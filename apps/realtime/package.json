@@ -1,0 +1,17 @@
+{
+  "name": "@lasustech-cbt/realtime",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node -r ../../node_modules/ts-node/register/transpile-only.js src/main.ts"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.6",
+    "ioredis": "^6.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.6.4"
+  }
+}

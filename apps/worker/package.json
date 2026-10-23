@@ -1,0 +1,20 @@
+{
+  "name": "@lasustech-cbt/worker",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "node -r ../../node_modules/ts-node/register/transpile-only.js src/main.ts"
+  },
+  "dependencies": {
+    "@lasustech-cbt/db": "workspace:*",
+    "bullmq": "^6.3.11",
+    "dotenv": "^18.0.6",
+    "ioredis": "^6.0.0",
+    "mammoth": "^1.8.0",
+    "pdf-parse": "^1.1.1",
+    "word-extractor": "^1.0.4",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@types/pdf-parse": "^1.1.4"
+  }
+}

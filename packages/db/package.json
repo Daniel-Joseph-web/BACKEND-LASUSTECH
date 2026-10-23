@@ -1,0 +1,39 @@
+{
+  "name": "@lasustech-cbt/db",
+  "version": "1.0.0",
+  "main": "src/index.ts",
+  "scripts": {
+    "generate": "prisma generate",
+    "format": "prisma format",
+    "validate": "prisma validate",
+    "migrate": "prisma migrate dev",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:regen-init": "node scripts/regen-init.mjs",
+    "migrate:status": "prisma migrate status",
+    "reset": "prisma migrate reset --force",
+    "seed": "prisma db seed",
+    "studio": "prisma studio",
+    "check": "node check-db.cjs",
+    "verify": "ts-node --transpile-only verify-db.ts",
+    "verify:fresh": "node scripts/rebuild-and-verify.mjs",
+    "inspect": "node scripts/inspect-db.mjs",
+    "dev:rebuild": "node scripts/archive-and-rebuild-dev.mjs",
+    "provision:app": "node scripts/provision-app-role.mjs",
+    "login-all": "ts-node --transpile-only login-all.ts",
+    "audit-roles": "ts-node --transpile-only audit.ts"
+  },
+  "prisma": {
+    "seed": "ts-node --transpile-only src/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bcryptjs": "^3.0.3",
+    "prisma": "^6.19.3"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^3.0.0",
+    "@types/node": "^26.6.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  }
+}

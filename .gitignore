@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Secrets — NEVER commit these. apps/api/.env and apps/worker/.env hold live
+# Cloudflare and Gemini credentials; they must be rotated and re-issued by hand.
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+.turbo/
+
+# Prisma / local database
+packages/db/prisma/*.db
+packages/db/prisma/*.db-journal
+# Written by the login smoke-test script; holds real session tokens.
+packages/db/test-tokens.json
+
+# Worker runtime data
+apps/worker/uploads/
+apps/worker/tmp/
+uploads/
+*.log
+
+# Generated dumps and stray credential jars
+codebase.txt
+jar.txt
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

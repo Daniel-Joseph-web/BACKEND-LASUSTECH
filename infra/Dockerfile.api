@@ -1,0 +1,17 @@
+FROM node:20-alpine AS base
+WORKDIR /app
+RUN npm install -g pnpm
+
+# Install dependencies and workspace packages
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml ./
+COPY packages/ ./packages/
+COPY apps/api/ ./apps/api/
+
+RUN pnpm install --frozen-lockfile || pnpm install
+
+# Build prisma client
+RUN pnpm db:generate
+
+EXPOSE 3001
+ENV NODE_ENV=production
+CMD ["node", "-r", "./node_modules/ts-node/register/transpile-only.js", "apps/api/src/main.ts"]
