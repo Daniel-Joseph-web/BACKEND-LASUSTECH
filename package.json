@@ -1,7 +1,6 @@
 {
   "name": "lasustech-cbt",
   "private": true,
-  "packageManager": "pnpm@9.12.0",
   "scripts": {
     "start": "node scripts/start-all.mjs",
     "dev": "pnpm -r run dev",
