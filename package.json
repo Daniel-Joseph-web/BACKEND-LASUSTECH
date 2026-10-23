@@ -2,6 +2,7 @@
   "name": "lasustech-cbt",
   "private": true,
   "scripts": {
+    "start": "node scripts/start-all.mjs",
     "dev": "pnpm -r run dev",
     "dev:api": "pnpm --filter @lasustech-cbt/api dev",
     "dev:worker": "pnpm --filter @lasustech-cbt/worker dev",
