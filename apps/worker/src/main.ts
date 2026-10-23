@@ -90,3 +90,15 @@ importWorker
   .catch((error: unknown) => {
     console.error('🔴 Worker could not become ready:', error);
   });
+
+
+// HTTP Health Check Server so Render Free Web Service does not time out
+import http from 'node:http';
+const HEALTH_PORT = Number(process.env.PORT || 3003);
+const healthServer = http.createServer((_req, res) => {
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ status: 'ok', service: 'lasustech-cbt-worker', queue: QUEUE_NAME }));
+});
+healthServer.listen(HEALTH_PORT, () => {
+  console.log(`🩺 Worker health check listening on port ${HEALTH_PORT}`);
+});
