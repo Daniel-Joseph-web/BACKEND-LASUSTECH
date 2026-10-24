@@ -11,7 +11,7 @@ export class AppError extends Error {
 
 export const Errors = {
   invalidCredentials: () =>
-    new AppError(401, 'AUTH_INVALID_CREDENTIALS', 'Wrong identifier or password.'),
+    new AppError(401, 'AUTH_INVALID_CREDENTIALS', 'Wrong email or password. Please verify your credentials and try again.'),
   locked: (retryAfterSec: number) =>
     new AppError(423, 'AUTH_LOCKED', 'Account locked. Try again later.', { retryAfterSec }),
   tokenExpired: () => new AppError(401, 'AUTH_TOKEN_EXPIRED', 'Session expired.'),

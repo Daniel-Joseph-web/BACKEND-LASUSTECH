@@ -197,13 +197,12 @@ const generateAccessCode = () => String(crypto.randomInt(100000, 1000000));
 const hashAccessCode = (code: string) => bcrypt.hash(code, 10);
 
 /**
- * One institution sitting at a time. There is no venue dimension any more, so
- * two school papers may never overlap. Public exams use a hidden sitting and
- * are excluded — a candidate online does not occupy the CBT hall.
+ * Allows up to two concurrent institution sittings (e.g. parallel halls or two exams on the same day).
+ * Public exams use a hidden sitting and are excluded.
  */
 async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: string, client?: any) {
   const db = client || prisma;
-  const clash = await db.sitting.findFirst({
+  const clashes = await db.sitting.findMany({
     where: {
       isPublic: false,
       status: { not: 'CANCELLED' },
@@ -223,7 +222,8 @@ async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: 
       },
     },
   });
-  if (clash) {
+  if (clashes.length >= 2) {
+    const clash = clashes[0];
     const clashExam = clash.exam.course
       ? `${clash.exam.course.code} — ${clash.exam.course.title}`
       : (clash.exam.subject?.name ?? clash.exam.title);
@@ -231,7 +231,7 @@ async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: 
     const to = clash.endsAt.toISOString().slice(11, 16);
     throw Errors.conflict(
       'TIME_CLASH',
-      `${clashExam} is already scheduled ${from}–${to} UTC. Only one school sitting can run at a time; pick a free slot.`,
+      `A maximum of 2 concurrent exams may be scheduled on this slot. Slot already has ${clashes.length} active exams (including ${clashExam} from ${from}–${to} UTC).`,
       { startsAt: clash.startsAt, endsAt: clash.endsAt },
     );
   }

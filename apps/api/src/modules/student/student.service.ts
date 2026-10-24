@@ -516,6 +516,7 @@ export async function getSittingDetails(userId: string, sittingId: string) {
   const graceMins = sitting.lateGraceMin || 15;
   const isGraceExpired = !inProgress && !isAlreadyTaken && !wasCreatedDuringSitting && now > new Date(sitting.startsAt.getTime() + graceMins * 60_000);
   const isWindowClosed = now > sitting.endsAt;
+  const isNotStartedYet = !inProgress && (now < sitting.startsAt && sitting.status !== 'OPEN');
 
   return {
     sitting: {
@@ -541,6 +542,7 @@ export async function getSittingDetails(userId: string, sittingId: string) {
       isAlreadyTaken,
       isGraceExpired,
       isWindowClosed,
+      isNotStartedYet,
     },
     candidate: {
       id: student.id,
@@ -643,8 +645,12 @@ export async function startSittingAttempt(
       await prisma.sitting.update({ where: { id: sitting.id }, data: { status: 'OPEN' } }).catch(() => {});
       sitting.status = 'OPEN';
     } else {
-      throw Errors.conflict('SITTING_NOT_STARTED', 'This examination sitting has not been opened by the invigilator yet.');
+      const scheduledTimeStr = sitting.startsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      throw Errors.conflict('SITTING_NOT_STARTED', `This examination is scheduled for ${scheduledTimeStr}. Access is not permitted until the scheduled start time.`);
     }
+  } else if (sitting.status !== 'OPEN' && now < sitting.startsAt) {
+    const scheduledTimeStr = sitting.startsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    throw Errors.conflict('SITTING_NOT_STARTED', `This examination is scheduled for ${scheduledTimeStr}. Access is not permitted until the scheduled start time.`);
   }
 
   const existing = sitting.attempts[0];
