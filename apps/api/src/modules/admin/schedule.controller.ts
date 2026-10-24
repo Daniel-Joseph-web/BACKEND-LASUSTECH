@@ -327,16 +327,55 @@ export const createSitting = async (req: Request, res: Response) => {
     throw Errors.badRequest('START_IN_PAST', 'The start time is in the past.');
   }
 
-  const candidates = exam.courseId
-    ? await prisma.enrollment.findMany({
-        where: {
-          courseId: exam.courseId,
-          ...(exam.sessionId ? { sessionId: exam.sessionId } : {}),
-          status: 'ACTIVE',
-        },
-        select: { studentId: true },
+  const examCourse = exam.courseId
+    ? await prisma.course.findUnique({
+        where: { id: exam.courseId },
+        select: { departmentId: true, level: true },
       })
-    : [];
+    : null;
+
+  const [enrolledStudents, departmentStudents] = await Promise.all([
+    exam.courseId
+      ? prisma.enrollment.findMany({
+          where: {
+            courseId: exam.courseId,
+            status: 'ACTIVE',
+          },
+          select: { studentId: true },
+        })
+      : Promise.resolve([]),
+    examCourse?.departmentId
+      ? prisma.user.findMany({
+          where: {
+            departmentId: examCourse.departmentId,
+            roles: { some: { role: { key: 'STUDENT' } } },
+            status: 'ACTIVE',
+          },
+          select: { id: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const candidateIdSet = new Set<string>([
+    ...enrolledStudents.map((e) => e.studentId),
+    ...departmentStudents.map((d) => d.id),
+  ]);
+
+  if (candidateIdSet.size === 0) {
+    const defaultStudents = await prisma.user.findMany({
+      where: {
+        roles: { some: { role: { key: 'STUDENT' } } },
+        status: 'ACTIVE',
+      },
+      select: { id: true },
+      take: 200,
+    });
+    for (const s of defaultStudents) {
+      candidateIdSet.add(s.id);
+    }
+  }
+
+  const candidates = [...candidateIdSet].map((studentId) => ({ studentId }));
 
   const accessCode = generateAccessCode();
   const accessCodeHash = await hashAccessCode(accessCode);

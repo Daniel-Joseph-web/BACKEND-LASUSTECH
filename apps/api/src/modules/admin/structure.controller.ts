@@ -1,4 +1,4 @@
-﻿import { Request, Response } from 'express';
+import { Request, Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma';
 import { Errors } from '../../lib/errors';
@@ -473,6 +473,7 @@ const presentCourse = (
     defaultSemester: string;
     active: boolean;
     departmentId: string;
+    department?: { id: string; code: string; name: string } | null;
   },
   lecturers: { id: string; names: string }[],
 ) => ({
@@ -484,13 +485,17 @@ const presentCourse = (
   semester: c.defaultSemester,
   active: c.active,
   departmentId: c.departmentId,
+  department: c.department ? { id: c.department.id, code: c.department.code, name: c.department.name } : null,
   lecturers,
 });
 
 export const listCourses = async (req: Request, res: Response) => {
   const q = z
     .object({
-      departmentId: z.uuid().optional(),
+      departmentId: z.preprocess(
+        (val) => (val === '' || val === null || val === undefined ? undefined : val),
+        z.string().uuid().optional(),
+      ),
       level: z.coerce.number().int().optional(),
       search: z.string().trim().max(80).optional(),
       status: z.enum(['active', 'archived']).optional(),
@@ -510,6 +515,9 @@ export const listCourses = async (req: Request, res: Response) => {
             ],
           }
         : {}),
+    },
+    include: {
+      department: { select: { id: true, code: true, name: true } },
     },
     orderBy: [{ level: 'asc' }, { code: 'asc' }],
     take: 500,

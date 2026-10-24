@@ -244,12 +244,13 @@ export async function getStudentDashboard(userId: string) {
       status: { not: 'CANCELLED' },
       isPublic: false,
       exam: {
-        status: 'APPROVED',
+        status: { in: ['APPROVED', 'LOCKED'] },
       },
       OR: [
         { students: { some: { studentId: userId } } },
         ...(courseIds.length ? [{ exam: { courseId: { in: courseIds } } }] : []),
         ...(student.department?.id ? [{ exam: { course: { departmentId: student.department.id } } }] : []),
+        { exam: { audience: 'INSTITUTIONAL' as const } },
       ],
     },
     include: {
@@ -282,8 +283,8 @@ export async function getStudentDashboard(userId: string) {
 
   for (const s of sittings) {
     const exam = s.exam;
-    // If the exam is no longer approved, skip it
-    if (exam.status !== 'APPROVED') continue;
+    // If the exam is no longer approved or locked, skip it
+    if (exam.status !== 'APPROVED' && exam.status !== 'LOCKED') continue;
 
     const courseCode = exam.course?.code || exam.title;
     const courseTitle = exam.course?.title || exam.title;
@@ -384,7 +385,19 @@ export async function getStudentDashboard(userId: string) {
     const codeNotif = notifications.find(
       (n) => n.meta && typeof n.meta === 'object' && (n.meta as any).sittingId === s.id && (n.meta as any).accessCode
     );
-    const accessCode = codeNotif ? (codeNotif.meta as any).accessCode : null;
+    let accessCode = codeNotif ? (codeNotif.meta as any).accessCode : null;
+    if (!accessCode && s.accessCodeHash) {
+      const anyNotif = await prisma.notification.findFirst({
+        where: {
+          type: 'EXAM_REMINDER',
+          meta: { path: ['sittingId'], equals: s.id },
+        },
+        select: { meta: true },
+      });
+      if (anyNotif?.meta && typeof anyNotif.meta === 'object' && (anyNotif.meta as any).accessCode) {
+        accessCode = (anyNotif.meta as any).accessCode;
+      }
+    }
 
     if (isLiveWindow) {
       live.push({
@@ -479,7 +492,7 @@ export async function getSittingDetails(userId: string, sittingId: string) {
   if (sitting.status === 'CLOSED') {
     throw Errors.conflict('SITTING_CLOSED', 'This examination sitting has ended and is closed.');
   }
-  if (sitting.exam.status !== 'APPROVED') {
+  if (sitting.exam.status !== 'APPROVED' && sitting.exam.status !== 'LOCKED') {
     throw Errors.conflict('EXAM_NOT_ACTIVE', 'This examination is currently disabled or not published.');
   }
 
@@ -629,7 +642,7 @@ export async function startSittingAttempt(
   if (generalSettings.liveExamMode === false) {
     throw Errors.conflict('EXAMS_DISABLED', 'Examinations are temporarily suspended by administrator.');
   }
-  if (sitting.exam.status !== 'APPROVED') {
+  if (sitting.exam.status !== 'APPROVED' && sitting.exam.status !== 'LOCKED') {
     throw Errors.conflict('EXAM_NOT_ACTIVE', 'This examination is currently disabled or not published.');
   }
 

@@ -385,6 +385,49 @@ export const createUser = async (req: Request, res: Response) => {
             },
           });
         }
+
+        // Auto-enroll student into all active courses for their department
+        const deptCourses = await tx.course.findMany({
+          where: { departmentId: deptId, active: true },
+          select: { id: true },
+        });
+        const activeSession =
+          (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
+          (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
+
+        if (deptCourses.length > 0 && activeSession) {
+          await tx.enrollment.createMany({
+            data: deptCourses.map((c) => ({
+              studentId: created.id,
+              courseId: c.id,
+              sessionId: activeSession.id,
+              status: 'ACTIVE' as const,
+            })),
+            skipDuplicates: true,
+          });
+
+          // Automatically link student to any active or scheduled exam sittings for these courses
+          const activeSittings = await tx.sitting.findMany({
+            where: {
+              status: { in: ['SCHEDULED', 'OPEN'] },
+              exam: {
+                courseId: { in: deptCourses.map((c) => c.id) },
+              },
+            },
+            select: { id: true },
+          });
+
+          if (activeSittings.length > 0) {
+            await tx.sittingStudent.createMany({
+              data: activeSittings.map((s) => ({
+                sittingId: s.id,
+                studentId: created.id,
+                seatLabel: 'Seat Assigned',
+              })),
+              skipDuplicates: true,
+            });
+          }
+        }
       }
     }
     const fresh = await tx.user.findUniqueOrThrow({ where: { id: created.id }, select: userSelect });
@@ -516,6 +559,48 @@ export const updateUser = async (req: Request, res: Response) => {
             programmeId: prog.id,
           },
         });
+      }
+
+      // Auto-enroll updated student into department courses if department changed or set
+      const deptCourses = await tx.course.findMany({
+        where: { departmentId: body.departmentId, active: true },
+        select: { id: true },
+      });
+      const activeSession =
+        (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
+        (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
+
+      if (deptCourses.length > 0 && activeSession) {
+        await tx.enrollment.createMany({
+          data: deptCourses.map((c) => ({
+            studentId: id,
+            courseId: c.id,
+            sessionId: activeSession.id,
+            status: 'ACTIVE' as const,
+          })),
+          skipDuplicates: true,
+        });
+
+        const activeSittings = await tx.sitting.findMany({
+          where: {
+            status: { in: ['SCHEDULED', 'OPEN'] },
+            exam: {
+              courseId: { in: deptCourses.map((c) => c.id) },
+            },
+          },
+          select: { id: true },
+        });
+
+        if (activeSittings.length > 0) {
+          await tx.sittingStudent.createMany({
+            data: activeSittings.map((s) => ({
+              sittingId: s.id,
+              studentId: id,
+              seatLabel: 'Seat Assigned',
+            })),
+            skipDuplicates: true,
+          });
+        }
       }
     }
     if (body.status && nextStatus !== 'ACTIVE') {
