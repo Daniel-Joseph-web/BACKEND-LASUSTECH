@@ -7,7 +7,7 @@
     "dev:api": "pnpm --filter @lasustech-cbt/api dev",
     "dev:worker": "pnpm --filter @lasustech-cbt/worker dev",
     "dev:realtime": "pnpm --filter @lasustech-cbt/realtime dev",
-    "build": "pnpm -r run build",
+    "build": "pnpm run db:generate",
     "test": "pnpm -r run test",
     "lint": "pnpm -r run lint",
     "db:generate": "pnpm --filter @lasustech-cbt/db run generate",

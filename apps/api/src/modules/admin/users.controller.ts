@@ -392,7 +392,7 @@ export const createUser = async (req: Request, res: Response) => {
         }
 
         // Auto-enroll student into active courses for their department and level
-        const deptCourses = await tx.course.findMany({
+        let deptCourses = await tx.course.findMany({
           where: {
             departmentId: deptId,
             active: true,
@@ -400,6 +400,12 @@ export const createUser = async (req: Request, res: Response) => {
           },
           select: { id: true },
         });
+        if (deptCourses.length === 0) {
+          deptCourses = await tx.course.findMany({
+            where: { departmentId: deptId, active: true },
+            select: { id: true },
+          });
+        }
         const activeSession =
           (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
           (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
@@ -577,7 +583,7 @@ export const updateUser = async (req: Request, res: Response) => {
 
         // Auto-enroll updated student into department courses if department or level changed
         const activeLevel = studentLevel ?? existing.profile?.level;
-        const deptCourses = await tx.course.findMany({
+        let deptCourses = await tx.course.findMany({
           where: {
             departmentId: targetDeptId,
             active: true,
@@ -585,6 +591,12 @@ export const updateUser = async (req: Request, res: Response) => {
           },
           select: { id: true },
         });
+        if (deptCourses.length === 0) {
+          deptCourses = await tx.course.findMany({
+            where: { departmentId: targetDeptId, active: true },
+            select: { id: true },
+          });
+        }
         const activeSession =
           (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
           (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
@@ -1367,7 +1379,16 @@ export const setUserCourses = async (req: Request, res: Response) => {
     throw Errors.conflict('NO_SESSION', 'Please create an academic session before assigning courses.');
   }
 
-  const courseIds = [...new Set(body.courseIds)];
+  let courseIds = [...new Set(body.courseIds)];
+  if (courseIds.length === 0 && isStudent && user.departmentId) {
+    // If no specific courses were selected, auto-enroll into all active courses for their department
+    const deptCourses = await prisma.course.findMany({
+      where: { departmentId: user.departmentId, active: true },
+      select: { id: true },
+    });
+    courseIds = deptCourses.map((c) => c.id);
+  }
+
   if (courseIds.length > 0) {
     const validCount = await prisma.course.count({
       where: { id: { in: courseIds } },
