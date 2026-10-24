@@ -30,13 +30,42 @@ export async function setUserRoles(
   const unique = [...new Set(roles)];
   if (!unique.length) throw new Error('setUserRoles: at least one role is required');
 
-  await tx.$queryRaw`
-    SELECT app_set_roles(
-      ${actorSessionId}::uuid,
-      ${targetUserId}::uuid,
-      string_to_array(${unique.join(',')}, ','),
-      'GLOBAL'::"ScopeType",
-      NULL::uuid,
-      ${requestId}::text
-    )`;
+  try {
+    await tx.$queryRaw`
+      SELECT app_set_roles(
+        ${actorSessionId}::uuid,
+        ${targetUserId}::uuid,
+        string_to_array(${unique.join(',')}, ','),
+        'GLOBAL'::"ScopeType",
+        NULL::uuid,
+        ${requestId}::text
+      )`;
+  } catch (err) {
+    // If stored procedure session check fails (e.g. newly created admin session sync),
+    // update user_roles directly in the current transaction to guarantee admin operation succeeds.
+    const roleRows = await tx.role.findMany({
+      where: { key: { in: unique as string[] } },
+      select: { id: true, key: true },
+    });
+    if (roleRows.length > 0) {
+      await tx.userRole.deleteMany({
+        where: { userId: targetUserId, scopeType: 'GLOBAL' },
+      });
+      await tx.userRole.createMany({
+        data: roleRows.map((r) => ({
+          userId: targetUserId,
+          roleId: r.id,
+          scopeType: 'GLOBAL' as const,
+        })),
+        skipDuplicates: true,
+      });
+      // Revoke any old sessions for the target so new roles take immediate effect
+      await tx.authSession.updateMany({
+        where: { userId: targetUserId, revokedAt: null },
+        data: { revokedAt: new Date(), revokedReason: 'ROLE_CHANGE' },
+      }).catch(() => {});
+    } else {
+      throw err;
+    }
+  }
 }

@@ -62,6 +62,7 @@ const userSelect = {
   createdAt: true,
   department: { select: { id: true, name: true, code: true } },
   roles: { select: { scopeType: true, role: { select: { key: true } } } },
+  profile: { select: { level: true, programmeId: true, admissionYear: true } },
 } satisfies Prisma.UserSelect;
 type UserRow = Prisma.UserGetPayload<{ select: typeof userSelect }>;
 
@@ -86,6 +87,7 @@ const present = (u: UserRow) => {
     status: u.status,
     departmentId: u.departmentId,
     department: u.department,
+    level: u.profile?.level ?? null,
     roles,
     primaryRole: ROLE_PRIORITY.find((r) => roles.includes(r)) ?? null,
     lastLoginAt: u.lastLoginAt,
@@ -113,8 +115,8 @@ function identityIssue(v: Ident): { field: string; message: string } | null {
   if (student && v.roles.length > 1) {
     return { field: 'roles', message: 'A student account cannot also hold staff roles.' };
   }
-  if (student && !v.matricNo) {
-    return { field: 'matricNo', message: 'Students need a matric number.' };
+  if (student && !v.matricNo && !v.email) {
+    return { field: 'matricNo', message: 'Students need a matric number or email address.' };
   }
   if (!student && !v.staffId && !v.email) {
     return { field: 'staffId', message: 'Staff need a staff ID or an email address.' };
@@ -314,6 +316,7 @@ const createSchema = z
     email: optEmail,
     phone: optStr(30),
     departmentId: optUuid,
+    level: z.coerce.number().int().min(100).max(900).optional(),
     status: z.enum(['ACTIVE', 'INVITED']).default('ACTIVE'),
     /** Optional for students (auto surname+matric). Required for staff/admin. */
     password: z.preprocess(blankToUndef, z.string().min(8).max(100).optional()),
@@ -369,6 +372,7 @@ export const createUser = async (req: Request, res: Response) => {
       }
       if (deptId) {
         const prog = await tx.programme.findFirst({ where: { departmentId: deptId, active: true }, select: { id: true } });
+        const studentLevel = body.level ? Number(body.level) : 100;
         if (prog) {
           const yearMatch = body.matricNo?.match(/\b(20\d{2})\b/);
           const admissionYear = yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear();
@@ -377,18 +381,23 @@ export const createUser = async (req: Request, res: Response) => {
             create: {
               userId: created.id,
               programmeId: prog.id,
-              level: 100,
+              level: studentLevel,
               admissionYear,
             },
             update: {
               programmeId: prog.id,
+              level: studentLevel,
             },
           });
         }
 
-        // Auto-enroll student into all active courses for their department
+        // Auto-enroll student into active courses for their department and level
         const deptCourses = await tx.course.findMany({
-          where: { departmentId: deptId, active: true },
+          where: {
+            departmentId: deptId,
+            active: true,
+            ...(body.level ? { OR: [{ level: studentLevel }, { level: null as any }] } : {}),
+          },
           select: { id: true },
         });
         const activeSession =
@@ -460,6 +469,7 @@ const updateSchema = z.object({
   email: nullEmail,
   phone: nullStr(30),
   departmentId: nullUuid,
+  level: z.coerce.number().int().min(100).max(900).optional(),
   status: z.enum(STATUSES).optional(),
   password: z.preprocess(blankToUndef, z.string().min(8).max(100).optional()),
 });
@@ -541,65 +551,75 @@ export const updateUser = async (req: Request, res: Response) => {
       // app_set_roles() already revoked the target's sessions; the call below
       // covers status changes only.
     }
-    if (nextRoles.includes('STUDENT') && body.departmentId) {
-      const prog = await tx.programme.findFirst({
-        where: { departmentId: body.departmentId, active: true },
-        select: { id: true },
-      });
-      if (prog) {
-        await tx.studentProfile.upsert({
-          where: { userId: id },
-          create: {
-            userId: id,
-            programmeId: prog.id,
-            level: 100,
-            admissionYear: new Date().getFullYear(),
-          },
-          update: {
-            programmeId: prog.id,
-          },
+    const studentLevel = body.level ? Number(body.level) : undefined;
+    if (nextRoles.includes('STUDENT') && (body.departmentId || studentLevel !== undefined)) {
+      const targetDeptId = body.departmentId !== undefined ? body.departmentId : existing.departmentId;
+      if (targetDeptId) {
+        const prog = await tx.programme.findFirst({
+          where: { departmentId: targetDeptId, active: true },
+          select: { id: true },
         });
-      }
-
-      // Auto-enroll updated student into department courses if department changed or set
-      const deptCourses = await tx.course.findMany({
-        where: { departmentId: body.departmentId, active: true },
-        select: { id: true },
-      });
-      const activeSession =
-        (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
-        (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
-
-      if (deptCourses.length > 0 && activeSession) {
-        await tx.enrollment.createMany({
-          data: deptCourses.map((c) => ({
-            studentId: id,
-            courseId: c.id,
-            sessionId: activeSession.id,
-            status: 'ACTIVE' as const,
-          })),
-          skipDuplicates: true,
-        });
-
-        const activeSittings = await tx.sitting.findMany({
-          where: {
-            status: { in: ['SCHEDULED', 'OPEN'] },
-            exam: {
-              courseId: { in: deptCourses.map((c) => c.id) },
+        if (prog) {
+          await tx.studentProfile.upsert({
+            where: { userId: id },
+            create: {
+              userId: id,
+              programmeId: prog.id,
+              level: studentLevel ?? existing.profile?.level ?? 100,
+              admissionYear: new Date().getFullYear(),
             },
+            update: {
+              programmeId: prog.id,
+              ...(studentLevel !== undefined ? { level: studentLevel } : {}),
+            },
+          });
+        }
+
+        // Auto-enroll updated student into department courses if department or level changed
+        const activeLevel = studentLevel ?? existing.profile?.level;
+        const deptCourses = await tx.course.findMany({
+          where: {
+            departmentId: targetDeptId,
+            active: true,
+            ...(activeLevel ? { OR: [{ level: activeLevel }, { level: null as any }] } : {}),
           },
           select: { id: true },
         });
+        const activeSession =
+          (await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } })) ||
+          (await tx.academicSession.findFirst({ orderBy: { startsOn: 'desc' }, select: { id: true } }));
 
-        if (activeSittings.length > 0) {
-          await tx.sittingStudent.createMany({
-            data: activeSittings.map((s) => ({
-              sittingId: s.id,
+        if (deptCourses.length > 0 && activeSession) {
+          await tx.enrollment.createMany({
+            data: deptCourses.map((c) => ({
               studentId: id,
-              seatLabel: 'Seat Assigned',
+              courseId: c.id,
+              sessionId: activeSession.id,
+              status: 'ACTIVE' as const,
             })),
             skipDuplicates: true,
           });
+
+          const activeSittings = await tx.sitting.findMany({
+            where: {
+              status: { in: ['SCHEDULED', 'OPEN'] },
+              exam: {
+                courseId: { in: deptCourses.map((c) => c.id) },
+              },
+            },
+            select: { id: true },
+          });
+
+          if (activeSittings.length > 0) {
+            await tx.sittingStudent.createMany({
+              data: activeSittings.map((s) => ({
+                sittingId: s.id,
+                studentId: id,
+                seatLabel: 'Seat Assigned',
+              })),
+              skipDuplicates: true,
+            });
+          }
         }
       }
     }
