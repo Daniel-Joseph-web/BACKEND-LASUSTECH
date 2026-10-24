@@ -24,11 +24,11 @@ export async function ensureSupportTable(): Promise<void> {
         replied_by VARCHAR(120),
         created_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW()
-      );
-      CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets (status);
-      CREATE INDEX IF NOT EXISTS idx_support_tickets_ref ON support_tickets (reference_no);
-      CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets (created_at DESC);
+      )
     `);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets (status)`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS idx_support_tickets_ref ON support_tickets (reference_no)`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets (created_at DESC)`);
     supportTableEnsured = true;
     console.log('[Support] support_tickets table ensured in database.');
   } catch (err: any) {
