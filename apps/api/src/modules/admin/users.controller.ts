@@ -1106,6 +1106,59 @@ export const importUsers = async (req: Request, res: Response) => {
                 },
               });
             }
+
+            // Auto-enroll student into all active courses for their department in the current session
+            let enrollSession = await tx.academicSession.findFirst({
+              where: { isCurrent: true },
+              select: { id: true },
+            });
+            if (!enrollSession) {
+              enrollSession = await tx.academicSession.findFirst({
+                where: { closedAt: null },
+                orderBy: { startsOn: 'desc' },
+                select: { id: true },
+              }) || await tx.academicSession.findFirst({
+                orderBy: { startsOn: 'desc' },
+                select: { id: true },
+              });
+            }
+            if (enrollSession) {
+              const deptCourses = await tx.course.findMany({
+                where: { departmentId: deptId, active: true },
+                select: { id: true },
+              });
+              if (deptCourses.length > 0) {
+                await tx.enrollment.createMany({
+                  data: deptCourses.map((course) => ({
+                    studentId: u.id,
+                    courseId: course.id,
+                    sessionId: enrollSession!.id,
+                    status: 'ACTIVE' as const,
+                  })),
+                  skipDuplicates: true,
+                });
+                // Auto-register into any active/scheduled sittings for these courses
+                const activeSittings = await tx.sitting.findMany({
+                  where: {
+                    status: { in: ['SCHEDULED', 'OPEN'] },
+                    exam: {
+                      courseId: { in: deptCourses.map((c) => c.id) },
+                      sessionId: enrollSession!.id,
+                    },
+                  },
+                  select: { id: true },
+                });
+                if (activeSittings.length > 0) {
+                  await tx.sittingStudent.createMany({
+                    data: activeSittings.map((s) => ({
+                      sittingId: s.id,
+                      studentId: u.id,
+                    })),
+                    skipDuplicates: true,
+                  });
+                }
+              }
+            }
           }
         }
         return u;

@@ -463,6 +463,44 @@ async function lecturersByCourse(courseIds: string[]) {
   return map;
 }
 
+/** Returns a map of courseId → number of ACTIVE enrolled students in the current/latest session. */
+async function studentCountByCourse(courseIds: string[]): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  if (!courseIds.length) return map;
+
+  // Resolve current or most-recent academic session
+  let session = await prisma.academicSession.findFirst({
+    where: { isCurrent: true },
+    select: { id: true },
+  });
+  if (!session) {
+    session = await prisma.academicSession.findFirst({
+      where: { closedAt: null },
+      orderBy: { startsOn: 'desc' },
+      select: { id: true },
+    }) || await prisma.academicSession.findFirst({
+      orderBy: { startsOn: 'desc' },
+      select: { id: true },
+    });
+  }
+  if (!session) return map;
+
+  const counts = await prisma.enrollment.groupBy({
+    by: ['courseId'],
+    where: {
+      courseId: { in: courseIds },
+      sessionId: session.id,
+      status: 'ACTIVE',
+    },
+    _count: { studentId: true },
+  });
+
+  for (const row of counts) {
+    map.set(row.courseId, row._count.studentId);
+  }
+  return map;
+}
+
 const presentCourse = (
   c: {
     id: string;
@@ -476,6 +514,7 @@ const presentCourse = (
     department?: { id: string; code: string; name: string } | null;
   },
   lecturers: { id: string; names: string }[],
+  studentCount = 0,
 ) => ({
   id: c.id,
   code: c.code,
@@ -487,6 +526,7 @@ const presentCourse = (
   departmentId: c.departmentId,
   department: c.department ? { id: c.department.id, code: c.department.code, name: c.department.name } : null,
   lecturers,
+  studentCount,
 });
 
 export const listCourses = async (req: Request, res: Response) => {
@@ -523,9 +563,13 @@ export const listCourses = async (req: Request, res: Response) => {
     take: 500,
   });
 
-  const lect = await lecturersByCourse(courses.map((c) => c.id));
+  const courseIds = courses.map((c) => c.id);
+  const [lect, studentCounts] = await Promise.all([
+    lecturersByCourse(courseIds),
+    studentCountByCourse(courseIds),
+  ]);
   res.json({
-    data: courses.map((c) => presentCourse(c, lect.get(c.id) ?? [])),
+    data: courses.map((c) => presentCourse(c, lect.get(c.id) ?? [], studentCounts.get(c.id) ?? 0)),
   });
 };
 
@@ -574,7 +618,7 @@ export const createCourse = async (req: Request, res: Response) => {
   );
 
   res.status(201).json({
-    data: presentCourse(c, (await lecturersByCourse([c.id])).get(c.id) ?? []),
+    data: presentCourse(c, (await lecturersByCourse([c.id])).get(c.id) ?? [], 0),
   });
 };
 
@@ -626,7 +670,7 @@ export const updateCourse = async (req: Request, res: Response) => {
   );
 
   res.json({
-    data: presentCourse(c, (await lecturersByCourse([c.id])).get(c.id) ?? []),
+    data: presentCourse(c, (await lecturersByCourse([c.id])).get(c.id) ?? [], (await studentCountByCourse([c.id])).get(c.id) ?? 0),
   });
 };
 
