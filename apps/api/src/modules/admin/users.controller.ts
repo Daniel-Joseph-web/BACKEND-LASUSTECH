@@ -1232,6 +1232,7 @@ export const getUserCourses = async (req: Request, res: Response) => {
       staffId: true,
       matricNo: true,
       email: true,
+      departmentId: true,
       roles: { select: { role: { select: { key: true } } } },
     },
   });
@@ -1253,10 +1254,12 @@ export const getUserCourses = async (req: Request, res: Response) => {
     });
   }
 
-  const isStudent = user.roles.some((r) => r.role.key === 'STUDENT');
+  const hasStaffRole = user.roles.some((r) => r.role.key === 'LECTURER' || r.role.key === 'ADMIN');
+  const hasStudentRole = user.roles.some((r) => r.role.key === 'STUDENT');
+  const isStudent = hasStudentRole || !hasStaffRole || !!user.matricNo;
 
-  if (isStudent) {
-    const enrollments = await prisma.enrollment.findMany({
+  const [enrollments, assignments] = await Promise.all([
+    prisma.enrollment.findMany({
       where: {
         studentId: userId,
         ...(session ? { sessionId: session.id } : {}),
@@ -1280,65 +1283,64 @@ export const getUserCourses = async (req: Request, res: Response) => {
         },
       },
       orderBy: { course: { code: 'asc' } },
-    });
-
-    return res.json({
-      data: {
-        user,
-        session,
-        isStudent: true,
-        assignments: enrollments.map((e) => ({
-          courseId: e.courseId,
-          course: e.course,
-          role: 'STUDENT',
-          sessionId: e.sessionId,
-          session: e.session,
-        })),
-        courseIds: enrollments.map((e) => e.courseId),
+    }),
+    prisma.courseAssignment.findMany({
+      where: {
+        userId,
+        ...(session ? { sessionId: session.id } : {}),
+        role: 'LECTURER',
       },
-    });
-  }
-
-  const assignments = await prisma.courseAssignment.findMany({
-    where: {
-      userId,
-      ...(session ? { sessionId: session.id } : {}),
-      role: 'LECTURER',
-    },
-    include: {
-      course: {
-        select: {
-          id: true,
-          code: true,
-          title: true,
-          level: true,
-          units: true,
-          active: true,
-          department: {
-            select: { id: true, name: true, code: true },
+      include: {
+        course: {
+          select: {
+            id: true,
+            code: true,
+            title: true,
+            level: true,
+            units: true,
+            active: true,
+            department: {
+              select: { id: true, name: true, code: true },
+            },
           },
         },
+        session: {
+          select: { id: true, name: true, isCurrent: true },
+        },
       },
-      session: {
-        select: { id: true, name: true, isCurrent: true },
-      },
-    },
-    orderBy: { course: { code: 'asc' } },
-  });
+      orderBy: { course: { code: 'asc' } },
+    }),
+  ]);
 
-  res.json({
-    data: {
-      user,
-      session,
-      isStudent: false,
-      assignments: assignments.map((a) => ({
+  const finalAssignments = isStudent
+    ? enrollments.map((e) => ({
+        courseId: e.courseId,
+        course: e.course,
+        role: 'STUDENT',
+        sessionId: e.sessionId,
+        session: e.session,
+      }))
+    : assignments.map((a) => ({
         courseId: a.courseId,
         course: a.course,
         role: a.role,
         sessionId: a.sessionId,
         session: a.session,
-      })),
-      courseIds: assignments.map((a) => a.courseId),
+      }));
+
+  const courseIds = isStudent
+    ? enrollments.map((e) => e.courseId)
+    : assignments.map((a) => a.courseId);
+
+  return res.json({
+    data: {
+      user,
+      session,
+      isStudent,
+      assignments: finalAssignments,
+      courseIds,
+      enrollments: enrollments.map((e) => e.courseId),
+      teachingAssignments: assignments.map((a) => a.courseId),
     },
   });
 };
@@ -1350,14 +1352,51 @@ export const setUserCourses = async (req: Request, res: Response) => {
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    include: { roles: { select: { role: { select: { key: true } } } } },
+    include: {
+      roles: { select: { role: { select: { key: true } } } },
+      profile: true,
+    },
   });
   if (!user) throw Errors.notFound('User');
 
-  const isStudent = user.roles.some((r) => r.role.key === 'STUDENT');
-  const isStaff = user.roles.some((r) => r.role.key === 'LECTURER' || r.role.key === 'ADMIN');
-  if (!isStaff && !isStudent) {
-    throw Errors.badRequest('INVALID_ROLE', 'User must hold STUDENT, LECTURER, or ADMIN role to have courses assigned.');
+  const hasStaffRole = user.roles.some((r) => r.role.key === 'LECTURER' || r.role.key === 'ADMIN');
+  const hasStudentRole = user.roles.some((r) => r.role.key === 'STUDENT');
+  const isStudent = hasStudentRole || !hasStaffRole || !!user.matricNo;
+
+  // Ensure appropriate roles exist so the user can access their respective portals seamlessly
+  if (isStudent && !hasStudentRole) {
+    const studentRole = await prisma.role.findUnique({ where: { key: 'STUDENT' } });
+    if (studentRole) {
+      await prisma.userRole.create({
+        data: { userId, roleId: studentRole.id, scopeType: 'GLOBAL' },
+      }).catch(() => {});
+    }
+  }
+  if (!isStudent && !user.roles.some((r) => r.role.key === 'LECTURER')) {
+    const lecturerRole = await prisma.role.findUnique({ where: { key: 'LECTURER' } });
+    if (lecturerRole) {
+      await prisma.userRole.create({
+        data: { userId, roleId: lecturerRole.id, scopeType: 'GLOBAL' },
+      }).catch(() => {});
+    }
+  }
+
+  // Ensure student profile exists if department is known
+  if (isStudent && user.departmentId && !user.profile) {
+    const prog = await prisma.programme.findFirst({
+      where: { departmentId: user.departmentId, active: true },
+      select: { id: true },
+    });
+    if (prog) {
+      await prisma.studentProfile.create({
+        data: {
+          userId,
+          programmeId: prog.id,
+          level: 100,
+          admissionYear: new Date().getFullYear(),
+        },
+      }).catch(() => {});
+    }
   }
 
   let session = body.sessionId

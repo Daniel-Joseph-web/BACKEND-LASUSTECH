@@ -398,15 +398,29 @@ async function setLecturers(tx: Tx, courseId: string, userIds: string[]) {
   }
 
   if (ids.length) {
-    const ok = await tx.user.count({
+    const validUsers = await tx.user.findMany({
       where: {
         id: { in: ids },
         status: 'ACTIVE',
-        roles: { some: { role: { key: 'LECTURER' } } },
+      },
+      include: {
+        roles: { include: { role: true } },
       },
     });
-    if (ok !== ids.length) {
-      throw Errors.badRequest('INVALID_LECTURER', 'Every assigned person must be an active lecturer.');
+    if (validUsers.length !== ids.length) {
+      throw Errors.badRequest('INVALID_LECTURER', 'One or more assigned lecturers could not be found or are inactive.');
+    }
+
+    const lecturerRole = await tx.role.findUnique({ where: { key: 'LECTURER' } });
+    if (lecturerRole) {
+      for (const u of validUsers) {
+        const hasLecturer = u.roles.some((r) => r.role.key === 'LECTURER');
+        if (!hasLecturer) {
+          await tx.userRole.create({
+            data: { userId: u.id, roleId: lecturerRole.id, scopeType: 'GLOBAL' },
+          }).catch(() => {});
+        }
+      }
     }
   }
 
@@ -683,6 +697,7 @@ export const deleteCourse = async (req: Request, res: Response) => {
 
   try {
     await prisma.$transaction(async (tx) => {
+      await tx.enrollment.deleteMany({ where: { courseId: id } });
       await tx.courseAssignment.deleteMany({ where: { courseId: id } });
       await tx.programmeCourse.deleteMany({ where: { courseId: id } });
       await tx.topic.deleteMany({ where: { courseId: id } });
