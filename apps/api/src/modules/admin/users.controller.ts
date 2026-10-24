@@ -396,7 +396,7 @@ export const createUser = async (req: Request, res: Response) => {
           where: {
             departmentId: deptId,
             active: true,
-            ...(body.level ? { OR: [{ level: studentLevel }, { level: null as any }] } : {}),
+            ...(studentLevel ? { level: studentLevel } : {}),
           },
           select: { id: true },
         });
@@ -587,7 +587,7 @@ export const updateUser = async (req: Request, res: Response) => {
           where: {
             departmentId: targetDeptId,
             active: true,
-            ...(activeLevel ? { OR: [{ level: activeLevel }, { level: null as any }] } : {}),
+            ...(activeLevel ? { level: activeLevel } : {}),
           },
           select: { id: true },
         });
