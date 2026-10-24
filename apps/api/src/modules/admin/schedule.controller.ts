@@ -201,8 +201,9 @@ const hashAccessCode = (code: string) => bcrypt.hash(code, 10);
  * two school papers may never overlap. Public exams use a hidden sitting and
  * are excluded — a candidate online does not occupy the CBT hall.
  */
-async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: string) {
-  const clash = await prisma.sitting.findFirst({
+async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: string, client?: any) {
+  const db = client || prisma;
+  const clash = await db.sitting.findFirst({
     where: {
       isPublic: false,
       status: { not: 'CANCELLED' },
@@ -241,9 +242,11 @@ async function assertInvigilatorsFree(
   startsAt: Date,
   endsAt: Date,
   excludeId?: string,
+  client?: any,
 ) {
   if (!userIds.length) return;
-  const clash = await prisma.sittingInvigilator.findFirst({
+  const db = client || prisma;
+  const clash = await db.sittingInvigilator.findFirst({
     where: {
       userId: { in: userIds },
       sitting: {
@@ -324,9 +327,6 @@ export const createSitting = async (req: Request, res: Response) => {
     throw Errors.badRequest('START_IN_PAST', 'The start time is in the past.');
   }
 
-  await assertNoSittingOverlap(startsAt, endsAt);
-  await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt);
-
   const candidates = exam.courseId
     ? await prisma.enrollment.findMany({
         where: {
@@ -343,6 +343,26 @@ export const createSitting = async (req: Request, res: Response) => {
   const courseLabel = exam.course ? `${exam.course.code} — ${exam.course.title}` : exam.title;
 
   const created = await prisma.$transaction(async (tx) => {
+    // 1. Guard against duplicate scheduling: Exam cannot be scheduled twice for active sittings
+    const existingActive = await tx.sitting.findFirst({
+      where: {
+        examId: exam.id,
+        status: { in: ['SCHEDULED', 'OPEN'] },
+      },
+      select: { id: true, startsAt: true, status: true },
+    });
+    if (existingActive) {
+      throw Errors.conflict(
+        'EXAM_ALREADY_SCHEDULED',
+        'This exam is already scheduled for an active sitting. An exam cannot be scheduled twice while another sitting is active or scheduled.',
+        { sittingId: existingActive.id, startsAt: existingActive.startsAt, status: existingActive.status },
+      );
+    }
+
+    // 2. Transactional overlap and invigilator checks to avoid race conditions
+    await assertNoSittingOverlap(startsAt, endsAt, undefined, tx);
+    await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt, undefined, tx);
+
     const sitting = await tx.sitting.create({
       data: {
         examId: exam.id,
@@ -487,9 +507,6 @@ export const updateSitting = async (req: Request, res: Response) => {
     ? sitting.exam.course.code
     : (sitting.exam.subject?.name ?? sitting.exam.title);
 
-  await assertNoSittingOverlap(startsAt, endsAt, id);
-  if (body.invigilatorIds) await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt, id);
-
   // Only a real move or re-duration is worth telling candidates about;
   // editing webcam/Seb settings must not produce noise.
   const scheduleChanged =
@@ -507,6 +524,8 @@ export const updateSitting = async (req: Request, res: Response) => {
   };
 
   await prisma.$transaction(async (tx) => {
+    await assertNoSittingOverlap(startsAt, endsAt, id, tx);
+    if (body.invigilatorIds) await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt, id, tx);
     await tx.sitting.update({ where: { id }, data });
     if (body.invigilatorIds) {
       await tx.sittingInvigilator.deleteMany({ where: { sittingId: id } });
@@ -750,4 +769,108 @@ export const deleteSitting = async (req: Request, res: Response) => {
   });
 
   res.status(204).end();
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const admitSchema = z.object({
+  identifier: z.string().trim().min(2), // matricNo, email, or userId
+  seatLabel: z.string().trim().max(40).optional(),
+});
+
+export const admitStudentToSitting = async (req: Request, res: Response) => {
+  const sittingId = uuidParam(req);
+  const body = admitSchema.parse(req.body);
+  const actor = actorFrom(req, res);
+
+  const sitting = await prisma.sitting.findUnique({
+    where: { id: sittingId },
+    select: {
+      id: true,
+      status: true,
+      exam: { select: { title: true, courseId: true, course: { select: { code: true } } } },
+    },
+  });
+  if (!sitting) throw Errors.notFound('Sitting');
+  if (sitting.status === 'CLOSED' || sitting.status === 'CANCELLED') {
+    throw Errors.conflict('SITTING_CLOSED', 'Cannot admit candidates to a closed or cancelled sitting.');
+  }
+
+  const isUuid = UUID_RE.test(body.identifier);
+  const student = await prisma.user.findFirst({
+    where: {
+      OR: [
+        ...(isUuid ? [{ id: body.identifier }] : []),
+        { matricNo: { equals: body.identifier, mode: 'insensitive' as const } },
+        { email: { equals: body.identifier, mode: 'insensitive' as const } },
+      ],
+      roles: { some: { role: { key: 'STUDENT' } } },
+    },
+    select: { id: true, names: true, matricNo: true, email: true },
+  });
+  if (!student) {
+    throw Errors.notFound('Student with that matric number or email was not found.');
+  }
+
+  const admitted = await prisma.$transaction(async (tx) => {
+    const sittingStudent = await tx.sittingStudent.upsert({
+      where: {
+        sittingId_studentId: {
+          sittingId,
+          studentId: student.id,
+        },
+      },
+      create: {
+        sittingId,
+        studentId: student.id,
+        seatLabel: body.seatLabel || `Seat-${Math.floor(Math.random() * 900 + 100)}`,
+      },
+      update: {
+        seatLabel: body.seatLabel || undefined,
+      },
+    });
+
+    // Also enroll them in the course if the exam has a course
+    if (sitting.exam.courseId) {
+      const currentSession = await tx.academicSession.findFirst({ where: { isCurrent: true }, select: { id: true } });
+      if (currentSession) {
+        await tx.enrollment.upsert({
+          where: {
+            studentId_courseId_sessionId: {
+              studentId: student.id,
+              courseId: sitting.exam.courseId,
+              sessionId: currentSession.id,
+            },
+          },
+          create: {
+            studentId: student.id,
+            courseId: sitting.exam.courseId,
+            sessionId: currentSession.id,
+            status: 'ACTIVE',
+          },
+          update: { status: 'ACTIVE' },
+        });
+      }
+    }
+
+    await writeAudit(tx, actor, {
+      action: 'sitting.admit_student',
+      targetType: 'Sitting',
+      targetId: sittingId,
+      after: { studentId: student.id, matricNo: student.matricNo, seatLabel: sittingStudent.seatLabel },
+    });
+
+    return sittingStudent;
+  });
+
+  res.json({
+    data: {
+      sittingId,
+      studentId: student.id,
+      names: student.names,
+      matricNo: student.matricNo,
+      seatLabel: admitted.seatLabel,
+      message: `${student.names} has been admitted to this exam sitting.`,
+    },
+  });
 };

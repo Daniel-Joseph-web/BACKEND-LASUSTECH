@@ -1056,7 +1056,14 @@ export const getUserCourses = async (req: Request, res: Response) => {
   const userId = uuidParam(req);
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, names: true, staffId: true, email: true },
+    select: {
+      id: true,
+      names: true,
+      staffId: true,
+      matricNo: true,
+      email: true,
+      roles: { select: { role: { select: { key: true } } } },
+    },
   });
   if (!user) throw Errors.notFound('User');
 
@@ -1073,6 +1080,52 @@ export const getUserCourses = async (req: Request, res: Response) => {
     }) || await prisma.academicSession.findFirst({
       orderBy: { startsOn: 'desc' },
       select: { id: true, name: true, isCurrent: true },
+    });
+  }
+
+  const isStudent = user.roles.some((r) => r.role.key === 'STUDENT');
+
+  if (isStudent) {
+    const enrollments = await prisma.enrollment.findMany({
+      where: {
+        studentId: userId,
+        ...(session ? { sessionId: session.id } : {}),
+      },
+      include: {
+        course: {
+          select: {
+            id: true,
+            code: true,
+            title: true,
+            level: true,
+            units: true,
+            active: true,
+            department: {
+              select: { id: true, name: true, code: true },
+            },
+          },
+        },
+        session: {
+          select: { id: true, name: true, isCurrent: true },
+        },
+      },
+      orderBy: { course: { code: 'asc' } },
+    });
+
+    return res.json({
+      data: {
+        user,
+        session,
+        isStudent: true,
+        assignments: enrollments.map((e) => ({
+          courseId: e.courseId,
+          course: e.course,
+          role: 'STUDENT',
+          sessionId: e.sessionId,
+          session: e.session,
+        })),
+        courseIds: enrollments.map((e) => e.courseId),
+      },
     });
   }
 
@@ -1107,6 +1160,7 @@ export const getUserCourses = async (req: Request, res: Response) => {
     data: {
       user,
       session,
+      isStudent: false,
       assignments: assignments.map((a) => ({
         courseId: a.courseId,
         course: a.course,
@@ -1130,9 +1184,10 @@ export const setUserCourses = async (req: Request, res: Response) => {
   });
   if (!user) throw Errors.notFound('User');
 
+  const isStudent = user.roles.some((r) => r.role.key === 'STUDENT');
   const isStaff = user.roles.some((r) => r.role.key === 'LECTURER' || r.role.key === 'ADMIN');
-  if (!isStaff) {
-    throw Errors.badRequest('INVALID_ROLE', 'Courses can only be assigned to staff holding LECTURER or ADMIN roles.');
+  if (!isStaff && !isStudent) {
+    throw Errors.badRequest('INVALID_ROLE', 'User must hold STUDENT, LECTURER, or ADMIN role to have courses assigned.');
   }
 
   let session = body.sessionId
@@ -1151,7 +1206,7 @@ export const setUserCourses = async (req: Request, res: Response) => {
   }
 
   if (!session) {
-    throw Errors.conflict('NO_SESSION', 'Please create an academic session before assigning courses to lecturers.');
+    throw Errors.conflict('NO_SESSION', 'Please create an academic session before assigning courses.');
   }
 
   const courseIds = [...new Set(body.courseIds)];
@@ -1166,34 +1221,85 @@ export const setUserCourses = async (req: Request, res: Response) => {
 
   const finalSession = session;
   await prisma.$transaction(async (tx) => {
-    // Clear previous assignments for this user in this session
-    await tx.courseAssignment.deleteMany({
-      where: {
-        userId,
-        sessionId: finalSession.id,
-        role: 'LECTURER',
-      },
-    });
+    if (isStudent) {
+      // Clear previous student course enrollments for this session
+      await tx.enrollment.deleteMany({
+        where: {
+          studentId: userId,
+          sessionId: finalSession.id,
+        },
+      });
 
-    // Create new assignments
-    if (courseIds.length > 0) {
-      await tx.courseAssignment.createMany({
-        data: courseIds.map((courseId) => ({
-          courseId,
+      if (courseIds.length > 0) {
+        // Create new active student enrollments
+        await tx.enrollment.createMany({
+          data: courseIds.map((courseId) => ({
+            courseId,
+            studentId: userId,
+            sessionId: finalSession.id,
+            status: 'ACTIVE' as const,
+          })),
+          skipDuplicates: true,
+        });
+
+        // Automatically register candidate into any active (SCHEDULED or OPEN) sittings for these courses!
+        const activeSittings = await tx.sitting.findMany({
+          where: {
+            status: { in: ['SCHEDULED', 'OPEN'] },
+            exam: {
+              courseId: { in: courseIds },
+              ...(finalSession ? { sessionId: finalSession.id } : {}),
+            },
+          },
+          select: { id: true },
+        });
+
+        if (activeSittings.length > 0) {
+          await tx.sittingStudent.createMany({
+            data: activeSittings.map((s) => ({
+              sittingId: s.id,
+              studentId: userId,
+            })),
+            skipDuplicates: true,
+          });
+        }
+      }
+
+      await writeAudit(tx, actor, {
+        action: 'user.enroll_courses',
+        targetType: 'User',
+        targetId: userId,
+        after: { courseIds, sessionId: finalSession.id, isStudent: true },
+      });
+    } else {
+      // Staff / Lecturer assignment
+      await tx.courseAssignment.deleteMany({
+        where: {
           userId,
           sessionId: finalSession.id,
-          role: 'LECTURER' as const,
-        })),
-        skipDuplicates: true,
+          role: 'LECTURER',
+        },
+      });
+
+      if (courseIds.length > 0) {
+        await tx.courseAssignment.createMany({
+          data: courseIds.map((courseId) => ({
+            courseId,
+            userId,
+            sessionId: finalSession.id,
+            role: 'LECTURER' as const,
+          })),
+          skipDuplicates: true,
+        });
+      }
+
+      await writeAudit(tx, actor, {
+        action: 'user.assign_courses',
+        targetType: 'User',
+        targetId: userId,
+        after: { courseIds, sessionId: finalSession.id, isStudent: false },
       });
     }
-
-    await writeAudit(tx, actor, {
-      action: 'user.assign_courses',
-      targetType: 'User',
-      targetId: userId,
-      after: { courseIds, sessionId: finalSession.id },
-    });
   });
 
   res.json({
@@ -1202,6 +1308,7 @@ export const setUserCourses = async (req: Request, res: Response) => {
       courseIds,
       assignedCount: courseIds.length,
       sessionId: finalSession.id,
+      isStudent,
     },
   });
 };

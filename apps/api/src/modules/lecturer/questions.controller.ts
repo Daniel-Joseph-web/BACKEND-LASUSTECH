@@ -330,9 +330,6 @@ export const updateQuestion = async (req: Request, res: Response) => {
   if (['LOCKED', 'RETIRED'].includes(latestVersion.status)) {
     throw Errors.conflict('LOCKED', 'This question is locked and cannot be edited.');
   }
-  if (latestVersion.status === 'PENDING') {
-    throw Errors.conflict('PENDING_REVIEW', 'This question is awaiting moderation and cannot be edited.');
-  }
 
   const updated = await prisma.$transaction(async (tx) => {
     let targetVersionId = latestVersion.id;
@@ -340,7 +337,7 @@ export const updateQuestion = async (req: Request, res: Response) => {
     const topicId =
       body.topicId !== undefined ? await resolveTopicId(tx, nextScope, body.topicId) : undefined;
 
-    const nextStatus = body.status ?? (latestVersion.status === 'APPROVED' ? 'APPROVED' : 'DRAFT');
+    const nextStatus = body.status ?? 'APPROVED';
     const isApproved = nextStatus === 'APPROVED';
 
     // Quick status toggle (Draft <-> Approved) without duplicating version

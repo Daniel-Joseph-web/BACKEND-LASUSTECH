@@ -22,7 +22,7 @@ import { publicExamRouter } from './modules/public-exams/public-exams.routes';
 import { notificationsRouter } from './modules/notifications/notifications.routes';
 import { studentRouter } from './modules/student/student.routes';
 import { listSessionsPublic } from './modules/admin/sessions.controller';
-import { createPublicSupportTicket } from './modules/admin/support.controller';
+import { createPublicSupportTicket, ensureSupportTable } from './modules/admin/support.controller';
 import { getGroup } from './lib/settings';
 import { authRateLimiter, globalApiRateLimiter } from './lib/rate-limiter';
 
@@ -259,6 +259,9 @@ async function start() {
   // Fail closed if the connection can do more than the API needs. See
   // lib/db-guard.ts and migration 2_identity_hardening.
   await assertLeastPrivilege();
+
+  // Ensure support tickets docket table is provisioned
+  await ensureSupportTable().catch(() => {});
 
   // Periodically synchronize sitting statuses (auto-open scheduled and auto-close expired)
   void syncSittingStatuses().catch(() => {});

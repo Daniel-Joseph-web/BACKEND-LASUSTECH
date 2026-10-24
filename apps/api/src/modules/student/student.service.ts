@@ -249,6 +249,7 @@ export async function getStudentDashboard(userId: string) {
       OR: [
         { students: { some: { studentId: userId } } },
         ...(courseIds.length ? [{ exam: { courseId: { in: courseIds } } }] : []),
+        ...(student.department?.id ? [{ exam: { course: { departmentId: student.department.id } } }] : []),
       ],
     },
     include: {
@@ -507,8 +508,13 @@ export async function getSittingDetails(userId: string, sittingId: string) {
   );
 
   const inProgress = latestAttempt && latestAttempt.status === 'IN_PROGRESS';
+  const userRecord = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { createdAt: true },
+  });
+  const wasCreatedDuringSitting = userRecord && userRecord.createdAt >= new Date(sitting.startsAt.getTime() - 30 * 60_000);
   const graceMins = sitting.lateGraceMin || 15;
-  const isGraceExpired = !inProgress && !isAlreadyTaken && now > new Date(sitting.startsAt.getTime() + graceMins * 60_000);
+  const isGraceExpired = !inProgress && !isAlreadyTaken && !wasCreatedDuringSitting && now > new Date(sitting.startsAt.getTime() + graceMins * 60_000);
   const isWindowClosed = now > sitting.endsAt;
 
   return {
@@ -661,8 +667,13 @@ export async function startSittingAttempt(
   }
 
   // Check late-login grace period after exam schedule starts
+  const candidateUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { createdAt: true },
+  });
+  const wasCreatedDuringSitting = candidateUser && candidateUser.createdAt >= new Date(sitting.startsAt.getTime() - 30 * 60_000);
   const graceMins = sitting.lateGraceMin || 15;
-  if (now > new Date(sitting.startsAt.getTime() + graceMins * 60_000)) {
+  if (!wasCreatedDuringSitting && now > new Date(sitting.startsAt.getTime() + graceMins * 60_000)) {
     throw Errors.conflict('GRACE_PERIOD_EXPIRED', 'The entry grace period for this examination schedule has expired. You are blocked from starting this examination.');
   }
 

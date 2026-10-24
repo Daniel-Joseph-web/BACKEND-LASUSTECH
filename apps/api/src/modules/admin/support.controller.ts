@@ -3,6 +3,39 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma';
 import { Errors } from '../../lib/errors';
 
+let supportTableEnsured = false;
+export async function ensureSupportTable(): Promise<void> {
+  if (supportTableEnsured) return;
+  try {
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS support_tickets (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        reference_no VARCHAR(60) UNIQUE NOT NULL,
+        name VARCHAR(120) NOT NULL,
+        identifier VARCHAR(60) NOT NULL,
+        email VARCHAR(120),
+        phone VARCHAR(30),
+        category VARCHAR(60) NOT NULL DEFAULT 'EXAM_ACCESS',
+        priority VARCHAR(20) NOT NULL DEFAULT 'NORMAL',
+        message TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'OPEN',
+        admin_reply TEXT,
+        replied_at TIMESTAMPTZ(3),
+        replied_by VARCHAR(120),
+        created_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ(3) NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets (status);
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_ref ON support_tickets (reference_no);
+      CREATE INDEX IF NOT EXISTS idx_support_tickets_created ON support_tickets (created_at DESC);
+    `);
+    supportTableEnsured = true;
+    console.log('[Support] support_tickets table ensured in database.');
+  } catch (err: any) {
+    console.warn('[Support] ensureSupportTable notice:', err?.message);
+  }
+}
+
 const createSupportSchema = z.object({
   name: z.string().trim().min(2).max(120),
   identifier: z.string().trim().min(2).max(60),
@@ -14,6 +47,7 @@ const createSupportSchema = z.object({
 });
 
 export async function createPublicSupportTicket(req: Request, res: Response) {
+  await ensureSupportTable();
   const body = createSupportSchema.parse(req.body);
   const ref = `LASU-SUP-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
@@ -47,6 +81,7 @@ export async function createPublicSupportTicket(req: Request, res: Response) {
 }
 
 export async function listSupportTickets(req: Request, res: Response) {
+  await ensureSupportTable();
   const status = req.query.status ? String(req.query.status) : undefined;
   const category = req.query.category ? String(req.query.category) : undefined;
   const search = req.query.search ? String(req.query.search).trim() : undefined;
@@ -97,6 +132,7 @@ export async function listSupportTickets(req: Request, res: Response) {
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function getSupportTicket(req: Request, res: Response) {
+  await ensureSupportTable();
   const id = String(req.params.id);
   const isUuid = UUID_REGEX.test(id);
   const rows = isUuid
@@ -141,6 +177,7 @@ const replySchema = z.object({
 });
 
 export async function replySupportTicket(req: Request, res: Response) {
+  await ensureSupportTable();
   const id = String(req.params.id);
   const body = replySchema.parse(req.body);
   const adminUser = req.auth?.userId
@@ -205,6 +242,7 @@ const updateStatusSchema = z.object({
 });
 
 export async function updateSupportTicketStatus(req: Request, res: Response) {
+  await ensureSupportTable();
   const id = String(req.params.id);
   const body = updateStatusSchema.parse(req.body);
   const isUuid = UUID_REGEX.test(id);
