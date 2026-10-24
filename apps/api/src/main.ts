@@ -269,6 +269,33 @@ async function start() {
     void syncSittingStatuses().catch(() => {});
   }, 15_000);
 
+  // Keep-Alive Pulse: Render free instances spin down after 15 minutes of inactivity.
+  // Pinging health endpoints every 8 minutes keeps the entire ecosystem warm ("HOT").
+  const KEEP_ALIVE_TARGETS = [
+    'https://backend-lasustech.onrender.com/health',
+    'https://realtime-websockets.onrender.com/health',
+    'https://background-worker-9ml0.onrender.com/health',
+  ];
+
+  const pulseKeepAlive = async () => {
+    for (const target of KEEP_ALIVE_TARGETS) {
+      try {
+        await fetch(target, { signal: AbortSignal.timeout(10_000) });
+      } catch {
+        // Silently ignore ping errors
+      }
+    }
+  };
+
+  let keepAliveInterval: NodeJS.Timeout | null = null;
+  setTimeout(() => {
+    void pulseKeepAlive();
+    keepAliveInterval = setInterval(() => {
+      void pulseKeepAlive();
+    }, 8 * 60 * 1000);
+    keepAliveInterval.unref();
+  }, 30_000);
+
   const server = app.listen(env.PORT, () => {
     console.log(`API running on port ${env.PORT}`);
     console.log(`Proxying /socket.io and WebSocket upgrades -> 127.0.0.1:3002`);
@@ -309,6 +336,7 @@ async function start() {
 
   const shutdown = () => {
     clearInterval(syncInterval);
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
     server.close(async () => {
       await prisma.$disconnect();
       process.exit(0);

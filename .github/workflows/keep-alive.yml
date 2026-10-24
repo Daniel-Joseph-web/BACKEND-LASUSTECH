@@ -1,0 +1,26 @@
+name: Keep Render Services Hot
+
+on:
+  schedule:
+    # Run every 10 minutes to prevent Render free instances from sleeping
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  keep-hot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping API Server
+        run: |
+          echo "Pinging backend API..."
+          curl -sSf --max-time 30 https://backend-lasustech.onrender.com/health || true
+
+      - name: Ping Realtime Server
+        run: |
+          echo "Pinging realtime server..."
+          curl -sSf --max-time 30 https://realtime-websockets.onrender.com/health || true
+
+      - name: Ping Background Worker
+        run: |
+          echo "Pinging background worker..."
+          curl -sSf --max-time 45 https://background-worker-9ml0.onrender.com/health || true
