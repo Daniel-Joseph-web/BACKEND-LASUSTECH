@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma';
 import { Errors } from '../../lib/errors';
+import { notifyUsers } from '../../lib/notify';
 
 let supportTableEnsured = false;
 export async function ensureSupportTable(): Promise<void> {
@@ -172,6 +173,49 @@ export async function getSupportTicket(req: Request, res: Response) {
   });
 }
 
+export async function getPublicSupportTicket(req: Request, res: Response) {
+  await ensureSupportTable();
+  const ref = String(req.params.ref).trim();
+  const isUuid = UUID_REGEX.test(ref);
+  const rows = isUuid
+    ? await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, reference_no, name, identifier, category, priority, status, admin_reply, replied_at, replied_by, created_at, updated_at
+         FROM support_tickets
+         WHERE id = $1::uuid OR reference_no = $1
+         LIMIT 1`,
+        ref
+      )
+    : await prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, reference_no, name, identifier, category, priority, status, admin_reply, replied_at, replied_by, created_at, updated_at
+         FROM support_tickets
+         WHERE reference_no = $1
+         LIMIT 1`,
+        ref
+      );
+
+  if (!rows.length) {
+    throw Errors.notFound('Support Ticket');
+  }
+
+  const r = rows[0];
+  res.json({
+    data: {
+      id: r.id,
+      referenceNo: r.reference_no,
+      name: r.name,
+      identifier: r.identifier,
+      category: r.category,
+      priority: r.priority,
+      status: r.status,
+      adminReply: r.admin_reply,
+      repliedAt: r.replied_at,
+      repliedBy: r.replied_by,
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    },
+  });
+}
+
 const replySchema = z.object({
   reply: z.string().trim().min(2).max(3000),
   status: z.enum(['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED']).default('RESOLVED'),
@@ -223,6 +267,42 @@ export async function replySupportTicket(req: Request, res: Response) {
 
   const r = rows[0];
 
+  // Send real-time and in-app notification to the student if registered in CBT
+  try {
+    const studentUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { matricNo: { equals: r.identifier.trim(), mode: 'insensitive' as const } },
+          ...(r.email ? [{ email: { equals: r.email.trim(), mode: 'insensitive' as const } }] : []),
+        ],
+      },
+      select: { id: true, names: true },
+    });
+
+    if (studentUser) {
+      const isResolved = body.status === 'RESOLVED' || body.status === 'CLOSED';
+      await notifyUsers(prisma as any, [studentUser.id], {
+        type: 'SYSTEM',
+        title: isResolved
+          ? `Support Ticket #${r.reference_no} Solved`
+          : `Support Ticket #${r.reference_no} Update`,
+        body: isResolved
+          ? `Your support ticket regarding "${r.category.replace(/_/g, ' ')}" has been solved. Resolution: "${body.reply.slice(0, 160)}${body.reply.length > 160 ? '...' : ''}"`
+          : `Admin reply on ticket #${r.reference_no}: "${body.reply.slice(0, 160)}${body.reply.length > 160 ? '...' : ''}"`,
+        meta: {
+          kind: 'SUPPORT_TICKET',
+          ticketId: r.id,
+          referenceNo: r.reference_no,
+          status: body.status,
+          adminReply: body.reply,
+          resolvedAt: new Date().toISOString(),
+        },
+      });
+    }
+  } catch (notifyErr: any) {
+    console.warn('[Support] Could not send student notification on ticket reply:', notifyErr?.message);
+  }
+
   res.json({
     data: {
       id: r.id,
@@ -270,10 +350,46 @@ export async function updateSupportTicketStatus(req: Request, res: Response) {
     throw Errors.notFound('Support Ticket');
   }
 
+  const r = rows[0];
+
+  // Send real-time and in-app notification to the student on status update
+  try {
+    const studentUser = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { matricNo: { equals: r.identifier.trim(), mode: 'insensitive' as const } },
+          ...(r.email ? [{ email: { equals: r.email.trim(), mode: 'insensitive' as const } }] : []),
+        ],
+      },
+      select: { id: true },
+    });
+
+    if (studentUser) {
+      const isResolved = body.status === 'RESOLVED' || body.status === 'CLOSED';
+      await notifyUsers(prisma as any, [studentUser.id], {
+        type: 'SYSTEM',
+        title: isResolved
+          ? `Support Ticket #${r.reference_no} Solved`
+          : `Support Ticket #${r.reference_no} Status: ${body.status}`,
+        body: isResolved
+          ? `Your support ticket #${r.reference_no} has been marked as solved.`
+          : `Your support ticket #${r.reference_no} is now ${body.status.replace(/_/g, ' ')}.`,
+        meta: {
+          kind: 'SUPPORT_TICKET',
+          ticketId: r.id,
+          referenceNo: r.reference_no,
+          status: body.status,
+        },
+      });
+    }
+  } catch (notifyErr: any) {
+    console.warn('[Support] Could not send status update notification:', notifyErr?.message);
+  }
+
   res.json({
     data: {
-      id: rows[0].id,
-      status: rows[0].status,
+      id: r.id,
+      status: r.status,
     },
     message: 'Status updated successfully.',
   });

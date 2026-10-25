@@ -22,7 +22,7 @@ import { publicExamRouter } from './modules/public-exams/public-exams.routes';
 import { notificationsRouter } from './modules/notifications/notifications.routes';
 import { studentRouter } from './modules/student/student.routes';
 import { listSessionsPublic } from './modules/admin/sessions.controller';
-import { createPublicSupportTicket, ensureSupportTable } from './modules/admin/support.controller';
+import { createPublicSupportTicket, getPublicSupportTicket, ensureSupportTable } from './modules/admin/support.controller';
 import { getGroup } from './lib/settings';
 import { authRateLimiter, globalApiRateLimiter } from './lib/rate-limiter';
 
@@ -92,6 +92,7 @@ v1.post('/auth/logout', logout);
 v1.post('/auth/verify', authRateLimiter, verifyClearanceCode);
 v1.post('/auth/reset-password', authRateLimiter, requestPasswordReset);
 v1.post('/support', createPublicSupportTicket);
+v1.get('/support/:ref', getPublicSupportTicket);
 v1.get('/me', requireAuth, me);
 v1.get('/sessions', requireAuth, listSessionsPublic);
 // Question figures are public so anonymous public-exam candidates can see them.
