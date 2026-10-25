@@ -57,7 +57,8 @@ export class CloudflareAiService {
   private static readonly ollamaBaseUrl = process.env.OLLAMA_BASE_URL;
   private static readonly ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5:7b-instruct';
 
-  private static readonly CHUNK_SIZE = 28000;
+  private static readonly MAX_QUESTIONS_PER_CHUNK = 10;
+  private static readonly MAX_CHARS_PER_CHUNK = 3500;
   private static readonly MAX_ATTEMPTS = 2;
 
   private static lastProvider: Provider | null = null;
@@ -124,11 +125,11 @@ STRICT EXTRACTION, COUNT & FIDELITY RULES:
 3. IMAGE & FIGURE PLACEHOLDERS:
    - If the source text contains image reference tokens like [IMG_REF_0], [IMG_REF_1], etc., associated with a question, set stemPlaceholder to that exact token (e.g. "[IMG_REF_0]").
    - If an image belongs to an option, set mediaPlaceholder to that token.
-   - Do not alter or strip [IMG_REF_X] tags.
+   - CRITICAL: If [IMG_REF_X] is present, DO NOT generate an SVG diagram! The image already exists in the document.
 4. MATHEMATICAL FORMULAS & LATEX:
    - For all mathematical variables, formulas, equations, fractions, square roots, matrices, limits, and chemical notations, use standard LaTeX enclosed in single dollar signs $...$ for inline (e.g. $y = 2x + 1$, $\\frac{a}{b}$, $\\sqrt{x^2 + y^2}$, $\\theta = 45^\\circ$) or double dollar signs $$...$$ for display equations. Set hasMath: true.
 5. HIGH-QUALITY VECTOR DIAGRAM RENDERING (SVGs):
-   - If a question mentions, relies upon, or describes a visual diagram, chart, graph, or figure (such as a histogram, bar chart, line graph, coordinate plane, geometry figure, circuit schematic, physics diagram, or logic gate) AND has no external [IMG_REF_X] image attached, you MUST generate and embed a professional, high-resolution, self-contained SVG diagram directly inside stemText immediately after the question prompt!
+   - ONLY if NO external [IMG_REF_X] image exists AND the question explicitly relies on or describes an unseen visual diagram, chart, graph, or figure (such as a histogram, bar chart, line graph, coordinate plane, geometry figure, circuit schematic, physics diagram, or logic gate), generate and embed a professional, high-resolution, self-contained SVG diagram directly inside stemText immediately after the question prompt!
    - SVG TECHNICAL SPECIFICATIONS:
      * Root element: <svg viewBox="0 0 600 320" xmlns="http://www.w3.org/2000/svg" style="background:#ffffff;border-radius:10px;border:1px solid #e2e8f0;">
      * Clean white background with crisp border ensuring high contrast in light and dark modes.
@@ -203,7 +204,7 @@ STRICT QUESTION QUALITY & VERIFICATION RULES:
     this.assertConfigured();
     if (!text || !text.trim()) throw new Error('No readable exam text was extracted.');
 
-    const chunks = this.splitText(text, this.CHUNK_SIZE);
+    const chunks = this.splitText(text);
     const all: ExtractedQuestion[] = [];
 
     console.log(`[AI] Extraction started. Source: ${text.length} chars; chunks: ${chunks.length}; provider: ${this.providerName()}`);
@@ -575,21 +576,23 @@ ${JSON.stringify(questions)}`;
     return this.validateQuestions((parsed as { questions: unknown[] }).questions);
   }
 
-  private static splitText(text: string, maxLength: number): string[] {
+  private static splitText(text: string): string[] {
     const source = text.trim();
     if (!source) return [];
-    // If the entire text fits within reasonable token limits, process in a single unified prompt.
-    // This gives modern LLMs complete question context and guarantees question counts match 100%.
-    if (source.length <= maxLength) return [source];
-
-    return this.splitIntoQuestionChunks(source, maxLength);
+    return this.splitIntoSmartChunks(source, this.MAX_QUESTIONS_PER_CHUNK, this.MAX_CHARS_PER_CHUNK);
   }
 
   /**
    * Splits an examination text strictly at whole-question boundaries without overlap.
-   * This completely prevents questions from being sliced in half or duplicated across chunks.
+   * Partitions by question count (at most 10-12 questions per chunk) so the AI's output
+   * remains comfortably within LLM output token limits (8,192 tokens), completely preventing
+   * token truncation and duplicate questions.
    */
-  private static splitIntoQuestionChunks(source: string, targetChunkLength: number): string[] {
+  private static splitIntoSmartChunks(
+    source: string,
+    maxQuestionsPerChunk: number,
+    maxCharsPerChunk: number,
+  ): string[] {
     // Regex matching question delimiters like:
     // "1.", "1)", "Question 1:", "Q1.", "(1)"
     const questionRegex = /(?:^|\n)\s*(?:(?:Question|Q)\s*\.?\s*\d+|\(?\d{1,3}\s*[\.\)]|\([a-z]\))\s+/gi;
@@ -600,26 +603,23 @@ ${JSON.stringify(questions)}`;
       matches.push(match.index);
     }
 
-    // If multiple clear question delimiters are found, partition cleanly along those boundaries
+    // If explicit question numbers are detected (e.g. 1. ... 50.)
     if (matches.length >= 2) {
       const chunks: string[] = [];
-      let chunkStart = 0;
-
-      for (let i = 1; i < matches.length; i++) {
-        const potentialEnd = matches[i];
-        if (potentialEnd - chunkStart >= targetChunkLength) {
-          const slice = source.slice(chunkStart, potentialEnd).trim();
-          if (slice) chunks.push(slice);
-          chunkStart = potentialEnd;
-        }
+      let startIdx = 0;
+      for (let i = 0; i < matches.length; i += maxQuestionsPerChunk) {
+        const nextIdx =
+          i + maxQuestionsPerChunk < matches.length
+            ? matches[i + maxQuestionsPerChunk]
+            : source.length;
+        const chunkText = source.slice(startIdx, nextIdx).trim();
+        if (chunkText) chunks.push(chunkText);
+        startIdx = nextIdx;
       }
-
-      const lastSlice = source.slice(chunkStart).trim();
-      if (lastSlice) chunks.push(lastSlice);
       return chunks;
     }
 
-    // Fallback: split on paragraph boundaries (double newlines) without overlap
+    // Fallback for unnumbered text: split by paragraphs without exceeding maxCharsPerChunk
     const paragraphs = source.split(/\n\s*\n/);
     const chunks: string[] = [];
     let current = '';
@@ -627,7 +627,7 @@ ${JSON.stringify(questions)}`;
     for (const para of paragraphs) {
       const trimmed = para.trim();
       if (!trimmed) continue;
-      if (current.length + trimmed.length + 2 > targetChunkLength && current.length > 0) {
+      if (current.length + trimmed.length > maxCharsPerChunk && current.length > 0) {
         chunks.push(current.trim());
         current = trimmed;
       } else {
@@ -651,6 +651,38 @@ ${JSON.stringify(questions)}`;
     return result;
   }
 
+  /**
+   * Recovers completed questions from a JSON string that was truncated by LLM token limits.
+   */
+  private static recoverTruncatedQuestionsJson(str: string): unknown {
+    const qIndex = str.indexOf('"questions"');
+    if (qIndex === -1) return null;
+    const arrayStart = str.indexOf('[', qIndex);
+    if (arrayStart === -1) return null;
+
+    let lastClose = str.lastIndexOf('}');
+    while (lastClose > arrayStart) {
+      const candidate = str.slice(0, lastClose + 1).trim().replace(/,\s*$/, '') + ']}';
+      const firstBrace = candidate.indexOf('{');
+      if (firstBrace !== -1) {
+        const validCandidate = candidate.slice(firstBrace);
+        try {
+          const parsed = JSON.parse(validCandidate);
+          if (parsed && Array.isArray((parsed as any).questions) && (parsed as any).questions.length > 0) {
+            console.log(
+              `[AI] Resilient parser salvaged ${(parsed as any).questions.length} questions from incomplete model response.`,
+            );
+            return parsed;
+          }
+        } catch {
+          // try previous '}'
+        }
+      }
+      lastClose = str.lastIndexOf('}', lastClose - 1);
+    }
+    return null;
+  }
+
   private static parseModelResponse(response: unknown): unknown {
     let value: unknown = response;
     if (typeof value === 'string') {
@@ -660,9 +692,11 @@ ${JSON.stringify(questions)}`;
         .trim();
       if (!cleaned) throw new Error('The AI returned an empty response.');
 
+      // 1. Direct parse
       try {
         return JSON.parse(cleaned);
       } catch {
+        // 2. Extract from first '{' to last '}'
         const firstBrace = cleaned.indexOf('{');
         const lastBrace = cleaned.lastIndexOf('}');
         if (firstBrace !== -1 && lastBrace > firstBrace) {
@@ -673,10 +707,15 @@ ${JSON.stringify(questions)}`;
             try {
               const repaired = this.repairJsonWithSvg(sliced);
               return JSON.parse(repaired);
-            } catch (err: any) {
-              console.warn('[AI] JSON repair failed:', err?.message);
+            } catch {
+              // 3. Fallback: recover all completed questions before truncation
+              const recovered = this.recoverTruncatedQuestionsJson(cleaned);
+              if (recovered) return recovered;
             }
           }
+        } else {
+          const recovered = this.recoverTruncatedQuestionsJson(cleaned);
+          if (recovered) return recovered;
         }
         throw new Error('The AI returned invalid or incomplete JSON.');
       }
@@ -788,24 +827,31 @@ ${JSON.stringify(questions)}`;
         const existingNorm = this.normalizeStemForComparison(existing.stemText);
         const existingSig = existingNorm.slice(0, 100);
 
-        if (stemSig === existingSig) {
-          dupIndex = i;
-          break;
-        }
+        const matchCount = q.options.filter((o) =>
+          existing.options.some(
+            (eo) =>
+              eo.text.toLowerCase().trim() === o.text.toLowerCase().trim() &&
+              o.text.trim().length > 1,
+          ),
+        ).length;
 
-        // Fuzzy similarity: stems share 35+ chars prefix and share answer options
-        if (
+        // Two questions with the same prompt (e.g. "Solve for x" or "Which transaction does this journal entry record?")
+        // are separate questions if their options or figures are distinct!
+        if (stemSig === existingSig) {
+          if (
+            matchCount >= 2 ||
+            (q.stemPlaceholder && existing.stemPlaceholder && q.stemPlaceholder === existing.stemPlaceholder) ||
+            q.options.length === 0 ||
+            existing.options.length === 0
+          ) {
+            dupIndex = i;
+            break;
+          }
+        } else if (
           stemSig.length >= 35 &&
           existingSig.length >= 35 &&
           (stemSig.startsWith(existingSig.slice(0, 45)) || existingSig.startsWith(stemSig.slice(0, 45)))
         ) {
-          const matchCount = q.options.filter((o) =>
-            existing.options.some(
-              (eo) =>
-                eo.text.toLowerCase().trim() === o.text.toLowerCase().trim() &&
-                o.text.trim().length > 1,
-            ),
-          ).length;
           if (matchCount >= 2) {
             dupIndex = i;
             break;
