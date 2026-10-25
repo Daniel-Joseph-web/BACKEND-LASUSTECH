@@ -2,6 +2,9 @@ import { Router } from 'express';
 import {
   getPublicAttempt,
   getPublicExam,
+  recordPublicEvent,
+  recordPublicFlag,
+  recordPublicHeartbeat,
   savePublicAnswer,
   startPublicAttempt,
   submitPublicAttempt,
@@ -24,4 +27,8 @@ publicExamRouter.post('/exams/:slug/start', startPublicAttempt);
 
 publicExamRouter.get('/attempts/:id', getPublicAttempt);
 publicExamRouter.put('/attempts/:id/answers', savePublicAnswer);
+publicExamRouter.post('/attempts/:id/answers', savePublicAnswer);
+publicExamRouter.post('/attempts/:id/heartbeat', recordPublicHeartbeat);
+publicExamRouter.post('/attempts/:id/events', recordPublicEvent);
+publicExamRouter.post('/attempts/:id/flag', recordPublicFlag);
 publicExamRouter.post('/attempts/:id/submit', submitPublicAttempt);

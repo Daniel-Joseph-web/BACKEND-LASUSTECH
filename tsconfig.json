@@ -6,6 +6,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
+  "exclude": ["temp-admin-script", "node_modules", "dist"],
   "ts-node": {
     "transpileOnly": true,
     "compilerOptions": {

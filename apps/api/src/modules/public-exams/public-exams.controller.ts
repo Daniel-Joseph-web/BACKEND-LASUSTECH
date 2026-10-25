@@ -7,6 +7,7 @@ import { prisma } from '../../lib/prisma';
 import { Errors } from '../../lib/errors';
 import { uuidParam, blankToUndef } from '../../lib/http';
 import { mediaUrl, mediaView } from '../../lib/media';
+import { publishRealtimeEvent } from '../../lib/realtime';
 import { bearerToken, signAttemptToken, verifyAttemptToken } from './attempt-token';
 import { readSelectedPositions, scoreAttempt } from './scoring';
 
@@ -165,6 +166,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
   const reveal = boolSetting(settings, 'showResults', true);
   return {
     attemptId: attempt.id,
+    sittingId: attempt.sittingId,
     token,
     status: attempt.status,
     startedAt: attempt.startedAt,
@@ -173,6 +175,8 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     questionCount: attempt.questionCount,
     totalMarks: Number(attempt.totalMarks),
     exam: examMeta(attempt.sitting.exam),
+    requireWebcam: attempt.sitting.requireWebcam ?? false,
+    antiCheatEnabled: boolSetting(settings, 'antiCheatEnabled', true),
     questions: presentPaper(attempt),
     result:
       current && reveal
@@ -211,6 +215,7 @@ async function resumeOrCreateSitting(exam: ExamMeta) {
   if (exam.sittings[0]) return exam.sittings[0];
   // Should have been created at publish time; this keeps older public exams
   // (published before the hidden sitting existed) working.
+  const settings = settingsOf(exam);
   const durationMin = exam.durationMin ?? 60;
   const now = new Date();
   return prisma.sitting.create({
@@ -228,7 +233,7 @@ async function resumeOrCreateSitting(exam: ExamMeta) {
       venue: null,
       isPublic: true,
       deliveryMode: 'REMOTE',
-      requireWebcam: false,
+      requireWebcam: boolSetting(settings, 'requireWebcam', true),
       requireSeb: false,
       accessCodeHash: crypto.randomBytes(32).toString('hex'),
       status: 'OPEN',
@@ -607,3 +612,143 @@ function visibleScore(attempt: AttemptWithPaper, summary: Awaited<ReturnType<typ
     passed: summary.passed,
   };
 }
+
+const lastPublicHeartbeatDbWrite = new Map<string, number>();
+
+export const recordPublicHeartbeat = async (req: Request, res: Response) => {
+  const attempt = await authorisedAttempt(req);
+  const now = new Date();
+  const lastWrite = lastPublicHeartbeatDbWrite.get(attempt.id) || 0;
+
+  if (now.getTime() - lastWrite >= 60_000) {
+    lastPublicHeartbeatDbWrite.set(attempt.id, now.getTime());
+    prisma.attemptEvent.create({
+      data: {
+        attemptId: attempt.id,
+        type: 'HEARTBEAT',
+        clientTs: now,
+        receivedAt: now,
+        payload: (req.body && typeof req.body === 'object' && req.body.meta) ? req.body.meta : null,
+      },
+    }).catch(() => {});
+  }
+
+  const latestMessage = await prisma.intervention.findFirst({
+    where: { attemptId: attempt.id, action: 'MESSAGE' },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  res.json({
+    data: {
+      status: attempt.status,
+      deadlineAt: attempt.deadlineAt,
+      extraMinutes: attempt.extraMinutes,
+      remainingSec: remainingSec(attempt),
+      isPaused: attempt.status === 'PAUSED',
+      message: latestMessage
+        ? {
+            id: latestMessage.id,
+            text: (latestMessage.params as any)?.message || latestMessage.reason,
+            sentAt: latestMessage.createdAt,
+          }
+        : null,
+    },
+  });
+};
+
+const publicEventSchema = z.object({
+  type: z.string().trim().min(1).max(64),
+  count: z.number().int().optional(),
+  payload: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const recordPublicEvent = async (req: Request, res: Response) => {
+  const attempt = await authorisedAttempt(req);
+  const body = publicEventSchema.parse(req.body);
+  const now = new Date();
+  const eventType = body.type;
+
+  await prisma.attemptEvent.create({
+    data: {
+      attemptId: attempt.id,
+      type: eventType,
+      clientTs: now,
+      receivedAt: now,
+      payload: (body.payload || (body.count ? { count: body.count } : null)) as Prisma.InputJsonValue,
+    },
+  }).catch(() => {});
+
+  if (eventType === 'TAB_SWITCH') {
+    const count = body.count ?? 1;
+    const severity = count >= 2 ? 'HIGH' : 'WARNING';
+    await prisma.flag.create({
+      data: {
+        attemptId: attempt.id,
+        ruleKey: 'TAB_SWITCH',
+        severity,
+        details: { switchCount: count, clientTs: now.toISOString() },
+      },
+    }).catch(() => {});
+
+    void publishRealtimeEvent({
+      event: 'attempt.flagged',
+      target: {
+        rooms: [`sitting:${attempt.sittingId}`],
+      },
+      data: {
+        sittingId: attempt.sittingId,
+        attemptId: attempt.id,
+        studentId: attempt.studentId,
+        ruleKey: 'TAB_SWITCH',
+        severity,
+        details: { switchCount: count },
+      },
+    });
+  }
+
+  res.json({ data: { recorded: true } });
+};
+
+export const recordPublicFlag = async (req: Request, res: Response) => {
+  const attempt = await authorisedAttempt(req);
+  const type = String(req.body?.reason || req.body?.type || 'TAB_SWITCH');
+  const count = typeof req.body?.count === 'number' ? req.body.count : 1;
+  const now = new Date();
+
+  await prisma.attemptEvent.create({
+    data: {
+      attemptId: attempt.id,
+      type,
+      clientTs: now,
+      receivedAt: now,
+      payload: { count, ...req.body },
+    },
+  }).catch(() => {});
+
+  const severity = count >= 2 ? 'HIGH' : 'WARNING';
+  await prisma.flag.create({
+    data: {
+      attemptId: attempt.id,
+      ruleKey: type,
+      severity,
+      details: { switchCount: count, clientTs: now.toISOString() },
+    },
+  }).catch(() => {});
+
+  void publishRealtimeEvent({
+    event: 'attempt.flagged',
+    target: {
+      rooms: [`sitting:${attempt.sittingId}`],
+    },
+    data: {
+      sittingId: attempt.sittingId,
+      attemptId: attempt.id,
+      studentId: attempt.studentId,
+      ruleKey: type,
+      severity,
+      details: { switchCount: count },
+    },
+  });
+
+  res.json({ data: { recorded: true } });
+};

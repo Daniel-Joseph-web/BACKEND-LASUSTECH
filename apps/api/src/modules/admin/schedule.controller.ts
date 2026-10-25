@@ -123,7 +123,6 @@ export const listSchedulableExams = async (req: Request, res: Response) => {
   const exams = await prisma.exam.findMany({
     where: {
       status: { in: ['APPROVED', 'LOCKED'] },
-      audience: 'INSTITUTIONAL',
       ...(q.sessionId ? { sessionId: q.sessionId } : {}),
     },
     select: {
@@ -132,6 +131,7 @@ export const listSchedulableExams = async (req: Request, res: Response) => {
       kind: true,
       status: true,
       audience: true,
+      durationMin: true,
       course: { select: { id: true, code: true, title: true, level: true } },
       subject: { select: { id: true, name: true, level: true, institution: true } },
       session: { select: { id: true, name: true } },
@@ -146,6 +146,7 @@ export const listSchedulableExams = async (req: Request, res: Response) => {
       kind: e.kind,
       status: e.status,
       audience: e.audience,
+      durationMin: e.durationMin,
       courseId: e.course?.id ?? null,
       courseCode: e.course?.code ?? (e.subject?.name ?? 'EXAM'),
       courseTitle: e.course?.title ?? (e.subject?.institution ? `${e.subject.name} (${e.subject.institution})` : e.title),
@@ -271,12 +272,12 @@ const createSchema = z.object({
   examId: z.uuid(),
   startsAt: z.iso.datetime({ offset: true }),
   endsAt: z.iso.datetime({ offset: true }).optional(),
-  durationMin: z.number().int().min(5).max(600),
+  durationMin: z.number().int().min(5).max(600).optional(),
   // Kept optional for older clients; the timetable no longer asks for a venue.
   venueId: z.uuid().optional(),
   invigilatorIds: z.array(z.uuid()).max(20).default([]),
   deliveryMode: z.enum(['LAB', 'REMOTE']).default('LAB'),
-  requireWebcam: z.boolean().default(false),
+  requireWebcam: z.boolean().default(true),
   requireSeb: z.boolean().default(false),
   timerMode: z.enum(['PER_STUDENT_START', 'FIXED_END']).default('PER_STUDENT_START'),
 });
@@ -296,6 +297,7 @@ export const createSitting = async (req: Request, res: Response) => {
         sessionId: true,
         createdBy: true,
         title: true,
+        durationMin: true,
         course: { select: { code: true, title: true } },
       },
     }),
@@ -309,6 +311,11 @@ export const createSitting = async (req: Request, res: Response) => {
       { status: exam.status },
     );
   }
+
+  // Exam duration is prescribed strictly by the course lecturer on the Exam entity.
+  // Admins only schedule the examination window, start time, and proctoring policy.
+  const sittingDuration = exam.durationMin || body.durationMin || 60;
+
   // Optional for compatibility; new sittings are simply "online / no venue".
   const venue = body.venueId
     ? await prisma.venue.findUnique({ where: { id: body.venueId } })
@@ -319,7 +326,7 @@ export const createSitting = async (req: Request, res: Response) => {
   if (Number.isNaN(startsAt.getTime())) throw Errors.badRequest('INVALID_DATE', 'Enter a valid start date and time.');
   const endsAt = body.endsAt
     ? new Date(body.endsAt)
-    : new Date(startsAt.getTime() + body.durationMin * 60_000);
+    : new Date(startsAt.getTime() + sittingDuration * 60_000);
   if (Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
     throw Errors.badRequest('INVALID_WINDOW', 'The exam window end time must be after the start time.');
   }
@@ -393,7 +400,7 @@ export const createSitting = async (req: Request, res: Response) => {
         examId: exam.id,
         startsAt,
         endsAt,
-        durationMin: body.durationMin,
+        durationMin: sittingDuration,
         timerMode: body.timerMode,
         lateGraceMin: examSettings.lateLoginGraceMins,
         lateCutoffMin: examSettings.lateLoginCutoffMins,
@@ -403,8 +410,9 @@ export const createSitting = async (req: Request, res: Response) => {
         venue: venue?.name ?? null,
         venueId: venue?.id ?? null,
         deliveryMode: body.deliveryMode,
-        requireWebcam: body.requireWebcam,
+        requireWebcam: body.requireWebcam ?? true,
         requireSeb: body.requireSeb,
+        isPublic: exam.audience === 'PUBLIC',
         accessCodeHash,
         status: 'SCHEDULED',
         students: {
@@ -429,7 +437,8 @@ export const createSitting = async (req: Request, res: Response) => {
       after: {
         exam: exam.title,
         startsAt: startsAt.toISOString(),
-        durationMin: body.durationMin,
+        durationMin: sittingDuration,
+        requireWebcam: body.requireWebcam ?? true,
         candidates: candidates.length,
         invigilators: body.invigilatorIds.length,
       },
@@ -503,6 +512,7 @@ export const updateSitting = async (req: Request, res: Response) => {
       exam: {
         select: {
           title: true,
+          durationMin: true,
           course: { select: { code: true } },
           subject: { select: { name: true } },
         },
@@ -519,10 +529,12 @@ export const updateSitting = async (req: Request, res: Response) => {
 
   const startsAt = body.startsAt ? new Date(body.startsAt) : sitting.startsAt;
   if (Number.isNaN(startsAt.getTime())) throw Errors.badRequest('INVALID_DATE', 'Enter a valid start date and time.');
-  const durationMin = body.durationMin ?? sitting.durationMin;
+
+  // Admin cannot change exam duration time; duration is set by the course lecturer on the Exam.
+  const durationMin = sitting.exam.durationMin ?? sitting.durationMin;
   const endsAt = body.endsAt
     ? new Date(body.endsAt)
-    : (body.startsAt && !body.durationMin && sitting.endsAt > startsAt
+    : (body.startsAt && sitting.endsAt > startsAt
       ? sitting.endsAt
       : new Date(startsAt.getTime() + durationMin * 60_000));
   if (Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
