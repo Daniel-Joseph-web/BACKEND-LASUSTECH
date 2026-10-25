@@ -262,6 +262,7 @@ const updateSchema = z
     resolutionNote: z.string().trim().max(2000).optional(),
     actionTaken: z.string().trim().max(1000).optional(),
     docketConfiscated: z.boolean().optional(),
+    holdResult: z.boolean().optional(),
   })
   .refine((v) => Object.values(v).some((x) => x !== undefined), {
     message: 'Nothing to update.',
@@ -279,6 +280,32 @@ export const updateIncident = async (req: Request, res: Response) => {
     body.status === 'RESOLVED' ? (before.resolvedAt ?? new Date()) : body.status ? null : undefined;
 
   const updated = await prisma.$transaction(async (tx) => {
+    if (before.attemptId) {
+      if (body.holdResult || body.actionTaken === 'HOLD_RESULT' || body.actionTaken === 'RESULT_HELD') {
+        await tx.flag.create({
+          data: {
+            attemptId: before.attemptId,
+            ruleKey: 'MALPRACTICE_HELD',
+            severity: 'HIGH',
+            details: {
+              incidentId: before.id,
+              referenceNo: before.referenceNo,
+              reason: body.resolutionNote || 'Malpractice confirmed upon incident review',
+              heldBy: actor.actorId,
+              heldAt: new Date().toISOString(),
+            },
+          },
+        }).catch(() => {});
+      } else if (body.actionTaken === 'EXONERATED' || body.actionTaken === 'CLEARED') {
+        await tx.flag.deleteMany({
+          where: {
+            attemptId: before.attemptId,
+            ruleKey: 'MALPRACTICE_HELD',
+          },
+        }).catch(() => {});
+      }
+    }
+
     const incident = await tx.incident.update({
       where: { id },
       data: {

@@ -11,11 +11,22 @@ import { activateSession, closeSession, createSession, deleteSession, listSessio
 import { exportAudit, listAudit, verifyAudit } from './audit.controller';
 import { flushSessions, getSettings, updateSettings } from './settings.controller';
 import { getAppeal, listAppeals, resolveAppeal, reviewAppeal } from './appeals.controller';
-import { approveResults, getSittingResults, exportSittingResultsCsv, getAttemptScript, listResults, overrideScore, releaseResults, resolveResultFlags } from './results.controller';
+import {
+  approveResults,
+  exportSittingResultsCsv,
+  getAttemptScript,
+  getSittingResults,
+  holdResult,
+  listResults,
+  overrideScore,
+  releaseResults,
+  resolveResultFlags,
+  unholdResult,
+} from './results.controller';
 import { broadsheet, exportIncidentEvents, incidentEvents, performance } from './reports.controller';
 import {
   admitStudentToSitting,
-  cancelSitting, closeSitting, createSitting, deleteSitting, listInvigilators, listSchedulableExams,
+  cancelSitting, closeSitting, createSitting, deleteSitting, getSittingAttendance, listInvigilators, listSchedulableExams,
   listSchedule, listVenues, openSitting, regenerateAccessCode, updateSitting,
 } from './schedule.controller';
 import {
@@ -96,6 +107,7 @@ adminRouter.post('/schedule/:id/close', closeSitting);
 adminRouter.post('/schedule/:id/cancel', cancelSitting);
 adminRouter.post('/schedule/:id/access-code', regenerateAccessCode);
 adminRouter.post('/schedule/:id/students', admitStudentToSitting);
+adminRouter.get('/schedule/:id/attendance', getSittingAttendance);
 
 // ---- Live proctoring ----
 adminRouter.get('/live', listLive);
@@ -114,6 +126,8 @@ adminRouter.get('/results/attempts/:attemptId/script', getAttemptScript);
 adminRouter.get('/results/:id', getSittingResults);
 adminRouter.get('/results/:id/export', exportSittingResultsCsv);
 adminRouter.post('/results/:id/override', overrideScore);
+adminRouter.post('/results/:id/hold', holdResult);
+adminRouter.post('/results/:id/unhold', unholdResult);
 adminRouter.post('/results/:id/approve', approveResults);
 adminRouter.post('/results/:id/release', releaseResults);
 adminRouter.post('/results/:id/resolve-flags', resolveResultFlags);

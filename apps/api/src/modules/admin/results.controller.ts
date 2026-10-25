@@ -430,7 +430,7 @@ export const getSittingResults = async (req: Request, res: Response) => {
   });
 };
 
-/** Exports sitting scores as a senate-ready CSV broadsheet. */
+/** Exports sitting scores as an official university examination broadsheet. */
 export const exportSittingResultsCsv = async (req: Request, res: Response) => {
   const sittingId = uuidParam(req);
 
@@ -567,6 +567,14 @@ export async function buildAttemptScriptPayload(attemptId: string) {
 
   if (!attempt) throw Errors.notFound('Attempt');
 
+  const isHeld = attempt.flags.some((f) => f.ruleKey === 'MALPRACTICE_HELD');
+  if (isHeld) {
+    throw Errors.forbidden(
+      'MALPRACTICE_HELD',
+      'This examination script cannot be reviewed because the result is currently withheld pending malpractice review.',
+    );
+  }
+
   const answersByQuestion = new Map(attempt.answers.map((a) => [a.questionVersionId, a]));
   const currentResult = attempt.results[0] ?? null;
 
@@ -683,7 +691,7 @@ export async function buildAttemptScriptPayload(attemptId: string) {
 
 const overrideScoreSchema = z.object({
   newRawScore: z.number().min(0, 'Score cannot be negative.'),
-  reason: z.string().trim().min(5, 'A clear reason for score adjustment is required (at least 5 characters).').max(1000),
+  reason: z.string().trim().max(1000).optional().default('Administrative score adjustment'),
 });
 
 /**
@@ -755,7 +763,7 @@ export const overrideScore = async (req: Request, res: Response) => {
         resultId: currentResult.id,
         oldScore: currentResult.rawScore,
         newScore: new Prisma.Decimal(body.newRawScore),
-        reason: body.reason,
+        reason: body.reason || 'Administrative score adjustment',
         createdBy: actor.actorId,
         approvedBy: actor.actorId,
       },
@@ -810,6 +818,79 @@ export const getAttemptScript = async (req: Request, res: Response) => {
   const attemptId = req.params.attemptId ? uuidParam(req, 'attemptId') : uuidParam(req);
   const payload = await buildAttemptScriptPayload(attemptId);
   res.json({ data: payload });
+};
+
+const holdResultSchema = z.object({
+  reason: z.string().trim().max(500).optional().default('Examination malpractice under review'),
+});
+
+/**
+ * Puts a candidate's result on hold for malpractice.
+ */
+export const holdResult = async (req: Request, res: Response) => {
+  const resultId = uuidParam(req);
+  const actor = actorFrom(req, res);
+  const body = holdResultSchema.parse(req.body);
+
+  const result = await prisma.result.findUnique({
+    where: { id: resultId },
+    include: { attempt: true },
+  });
+
+  if (!result) throw Errors.notFound('Result');
+
+  await prisma.$transaction(async (tx) => {
+    await tx.flag.create({
+      data: {
+        attemptId: result.attemptId,
+        ruleKey: 'MALPRACTICE_HELD',
+        severity: 'HIGH',
+        details: { reason: body.reason, heldBy: actor.actorId, heldAt: new Date().toISOString() },
+      },
+    });
+
+    await writeAudit(tx, actor, {
+      action: 'result.hold',
+      targetType: 'Result',
+      targetId: resultId,
+      after: { attemptId: result.attemptId, reason: body.reason },
+    });
+  });
+
+  res.json({ data: { resultId, isHeld: true, message: 'Result placed on malpractice hold.' } });
+};
+
+/**
+ * Releases a candidate's result from malpractice hold.
+ */
+export const unholdResult = async (req: Request, res: Response) => {
+  const resultId = uuidParam(req);
+  const actor = actorFrom(req, res);
+
+  const result = await prisma.result.findUnique({
+    where: { id: resultId },
+    include: { attempt: true },
+  });
+
+  if (!result) throw Errors.notFound('Result');
+
+  await prisma.$transaction(async (tx) => {
+    await tx.flag.deleteMany({
+      where: {
+        attemptId: result.attemptId,
+        ruleKey: 'MALPRACTICE_HELD',
+      },
+    });
+
+    await writeAudit(tx, actor, {
+      action: 'result.unhold',
+      targetType: 'Result',
+      targetId: resultId,
+      after: { attemptId: result.attemptId, released: true },
+    });
+  });
+
+  res.json({ data: { resultId, isHeld: false, message: 'Result released from hold.' } });
 };
 
 

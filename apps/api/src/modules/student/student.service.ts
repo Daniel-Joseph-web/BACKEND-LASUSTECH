@@ -1226,6 +1226,10 @@ export async function getStudentResults(userId: string) {
     include: {
       attempt: {
         include: {
+          flags: {
+            where: { ruleKey: 'MALPRACTICE_HELD' },
+            select: { id: true, ruleKey: true, details: true },
+          },
           sitting: {
             include: {
               exam: {
@@ -1251,13 +1255,16 @@ export async function getStudentResults(userId: string) {
     maxScore: number;
     percent: number;
     scoreLabel: string;
-    remark: 'Pass' | 'Fail';
+    remark: 'Pass' | 'Fail' | 'Withheld';
     passed: boolean;
     level: string;
     semester: string;
     session: string;
     scoredAt: string;
     status: string;
+    isHeld?: boolean;
+    holdReason?: string;
+    canReviewScript?: boolean;
   };
 
   const list: ResultItem[] = [];
@@ -1270,23 +1277,29 @@ export async function getStudentResults(userId: string) {
     const maxScore = Number(r.maxScore);
     const passThreshold = exam.passMark != null ? Number(exam.passMark) : 40;
     const passed = percent >= passThreshold;
+    const heldFlag = r.attempt.flags && r.attempt.flags.length > 0 ? r.attempt.flags[0] : null;
+    const isHeld = !!heldFlag || (r.status as string) === 'HELD';
+    const heldDetails = heldFlag?.details as any;
 
     list.push({
       code: course?.code || exam.title,
       title: course?.title || exam.title,
       attemptId: r.attempt.id,
-      examScore: percent,
-      rawScore,
+      examScore: isHeld ? 0 : percent,
+      rawScore: isHeld ? 0 : rawScore,
       maxScore,
-      percent,
-      scoreLabel: `${rawScore} / ${maxScore}`,
-      remark: passed ? 'Pass' : 'Fail',
-      passed,
+      percent: isHeld ? 0 : percent,
+      scoreLabel: isHeld ? 'WITHHELD' : `${rawScore} / ${maxScore}`,
+      remark: isHeld ? 'Withheld' : (passed ? 'Pass' : 'Fail'),
+      passed: isHeld ? false : passed,
       level: course?.level ? `${course.level} Level` : 'Undergraduate',
       semester: 'Harmattan (1st)',
       session: exam.session?.name || '2026/2027',
       scoredAt: r.scoredAt.toISOString(),
-      status: r.status,
+      status: isHeld ? 'HELD' : r.status,
+      isHeld,
+      holdReason: isHeld ? (heldDetails?.reason || 'Result withheld for malpractice review') : undefined,
+      canReviewScript: !isHeld,
     });
   }
 

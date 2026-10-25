@@ -588,6 +588,22 @@ export const updateSitting = async (req: Request, res: Response) => {
       },
     });
 
+    if (body.accessCode) {
+      void publishRealtimeEvent({
+        event: 'sitting.access_code_updated',
+        target: {
+          rooms: [`sitting:${id}`],
+          roles: ['ADMIN'],
+        },
+        data: {
+          sittingId: id,
+          accessCode: body.accessCode,
+          courseLabel: examLabel,
+          updatedAt: new Date().toISOString(),
+        },
+      });
+    }
+
     if (scheduleChanged) {
       const students = await tx.sittingStudent.findMany({
         where: { sittingId: id },
@@ -647,6 +663,20 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
         meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, href: `/student/exam/${id}/start?code=${accessCode}` },
       },
     );
+
+    void publishRealtimeEvent({
+      event: 'sitting.access_code_updated',
+      target: {
+        rooms: [`sitting:${id}`],
+        roles: ['ADMIN'],
+      },
+      data: {
+        sittingId: id,
+        accessCode,
+        courseLabel,
+        updatedAt: new Date().toISOString(),
+      },
+    });
   });
   res.json({ data: { id, accessCode } });
 };
@@ -908,6 +938,109 @@ export const admitStudentToSitting = async (req: Request, res: Response) => {
       matricNo: student.matricNo,
       seatLabel: admitted.seatLabel,
       message: `${student.names} has been admitted to this exam sitting.`,
+    },
+  });
+};
+
+export const getSittingAttendance = async (req: Request, res: Response) => {
+  const id = uuidParam(req);
+  const sitting = await prisma.sitting.findUnique({
+    where: { id },
+    include: {
+      exam: {
+        include: {
+          course: true,
+          subject: true,
+          session: true,
+        },
+      },
+      venueRef: true,
+      invigilators: {
+        include: {
+          user: {
+            select: { id: true, names: true, staffId: true, email: true },
+          },
+        },
+      },
+      students: {
+        include: {
+          student: {
+            select: {
+              id: true,
+              names: true,
+              matricNo: true,
+              email: true,
+              department: { select: { name: true, code: true } },
+            },
+          },
+        },
+        orderBy: [
+          { student: { matricNo: 'asc' } },
+          { student: { names: 'asc' } },
+        ],
+      },
+      attempts: {
+        select: {
+          id: true,
+          studentId: true,
+          status: true,
+          startedAt: true,
+          submittedAt: true,
+          ipStart: true,
+        },
+      },
+    },
+  });
+
+  if (!sitting) throw Errors.notFound('Sitting');
+
+  const attemptsByStudent = new Map(sitting.attempts.map((a) => [a.studentId, a]));
+
+  const attendees = sitting.students.map((st, index) => {
+    const attempt = attemptsByStudent.get(st.studentId);
+    const isPresent = Boolean(attempt && attempt.startedAt);
+    return {
+      sn: index + 1,
+      studentId: st.studentId,
+      matricNo: st.student.matricNo ?? '—',
+      names: st.student.names,
+      department: st.student.department?.name ?? '—',
+      seatLabel: st.seatLabel ?? '—',
+      isPresent,
+      attemptStatus: attempt?.status ?? 'NOT_STARTED',
+      startedAt: attempt?.startedAt ? attempt.startedAt.toISOString() : null,
+      submittedAt: attempt?.submittedAt ? attempt.submittedAt.toISOString() : null,
+      ipAddress: attempt?.ipStart ?? null,
+    };
+  });
+
+  const presentCount = attendees.filter((a) => a.isPresent).length;
+  const absentCount = attendees.length - presentCount;
+
+  res.json({
+    data: {
+      sittingId: sitting.id,
+      examTitle: sitting.exam.title,
+      courseCode: sitting.exam.course?.code ?? sitting.exam.subject?.name ?? 'EXAM',
+      courseTitle: sitting.exam.course?.title ?? sitting.exam.title,
+      level: sitting.exam.course?.level ?? null,
+      sessionName: sitting.exam.session?.name ?? 'Current Session',
+      startsAt: sitting.startsAt.toISOString(),
+      endsAt: sitting.endsAt.toISOString(),
+      durationMin: sitting.durationMin,
+      venue: sitting.venue ?? sitting.venueRef?.name ?? 'CBT Centre',
+      venueCapacity: sitting.venueRef?.capacity ?? null,
+      deliveryMode: sitting.deliveryMode,
+      requireWebcam: sitting.requireWebcam,
+      totalRegistered: attendees.length,
+      presentCount,
+      absentCount,
+      invigilators: sitting.invigilators.map((i) => ({
+        id: i.user.id,
+        names: i.user.names,
+        staffId: i.user.staffId ?? '—',
+      })),
+      attendees,
     },
   });
 };
