@@ -57,8 +57,7 @@ export class CloudflareAiService {
   private static readonly ollamaBaseUrl = process.env.OLLAMA_BASE_URL;
   private static readonly ollamaModel = process.env.OLLAMA_MODEL || 'qwen2.5:7b-instruct';
 
-  private static readonly CHUNK_SIZE = 2400;
-  private static readonly CHUNK_OVERLAP = 240;
+  private static readonly CHUNK_SIZE = 28000;
   private static readonly MAX_ATTEMPTS = 2;
 
   private static lastProvider: Provider | null = null;
@@ -94,9 +93,9 @@ export class CloudflareAiService {
   }
 
   private static readonly extractionPrompt = `
-You extract multiple-choice questions from examination documents.
+You extract multiple-choice questions from examination documents with 100% academic accuracy and high fidelity.
 
-Return exactly one JSON object:
+Return exactly one valid JSON object:
 {
   "questions": [
     {
@@ -113,26 +112,61 @@ Return exactly one JSON object:
   ]
 }
 
-STRICT VERIFICATION & EXTRACTION RULES:
-1. Extract only actual multiple-choice questions present in the source.
-2. Every question must be fully verified: ensure the prompt is coherent and has at least two viable choices (ideally 4 choices: A, B, C, D).
-3. Verify that each question has EXACTLY ONE correct answer marked isCorrect: true. If the answer key is not explicitly stated in the source text, carefully solve the question yourself using expert subject-matter knowledge to determine the single correct answer and mark its isCorrect to true.
-4. MATHEMATICAL FORMULAS & LATEX: For any mathematical notation, variables, algebraic expressions, powers, square roots, fractions, limits, integrals, or chemical equations, use standard LaTeX enclosed in single dollar signs $...$ for inline formulas (e.g. $y = 2x$, $\\frac{a}{b}$, $x^2 + y^2 = 25$, $\\sqrt{x}$) or double dollar signs $$...$$ for display formulas.
-5. DIAGRAMS: If a question mentions or relies on a visual figure or diagram (e.g., geometric figures, coordinate axes, angle measurements, circuits, logic gates, physics vectors, flowcharts, or biology illustrations) and no external image URL exists, generate and embed a clean, valid SVG diagram <svg viewBox="0 0 500 140" xmlns="http://www.w3.org/2000/svg">...</svg> within stemText directly after the text prompt so candidates can visually inspect the diagram.
-6. Never treat a story, reading passage, paragraph, explanation, or sentence from a passage as an answer choice.
-7. Preserve the original question and answer-choice wording.
-8. For questions tied to a shared reading passage, include sufficient passage context in each affected stemText.
-9. Use zero-based option positions (0 for A, 1 for B, 2 for C, 3 for D).
-10. Use EASY, MEDIUM, or HARD for difficulty. Set hasMath to true if mathematical notation or equations appear.
-11. Return valid, complete JSON only. No Markdown fences or commentary.
+STRICT EXTRACTION, COUNT & FIDELITY RULES:
+1. EXACT QUESTION PRESERVATION & COUNT:
+   - Extract every complete multiple-choice question in the source in order.
+   - If the exam has 50 questions, extract EXACTLY those 50 questions. Never hallucinate, duplicate, repeat, or invent questions.
+   - Do not re-extract the same question multiple times.
+2. OPTION INTEGRITY:
+   - Every question must have at least 2 options (ideally 4 options: A, B, C, D).
+   - Use zero-based option positions (0 for A, 1 for B, 2 for C, 3 for D).
+   - EXACTLY ONE correct answer marked isCorrect: true. If not explicitly marked in the source, carefully solve the question yourself using expert subject-matter knowledge to determine the single correct answer.
+3. IMAGE & FIGURE PLACEHOLDERS:
+   - If the source text contains image reference tokens like [IMG_REF_0], [IMG_REF_1], etc., associated with a question, set stemPlaceholder to that exact token (e.g. "[IMG_REF_0]").
+   - If an image belongs to an option, set mediaPlaceholder to that token.
+   - Do not alter or strip [IMG_REF_X] tags.
+4. MATHEMATICAL FORMULAS & LATEX:
+   - For all mathematical variables, formulas, equations, fractions, square roots, matrices, limits, and chemical notations, use standard LaTeX enclosed in single dollar signs $...$ for inline (e.g. $y = 2x + 1$, $\\frac{a}{b}$, $\\sqrt{x^2 + y^2}$, $\\theta = 45^\\circ$) or double dollar signs $$...$$ for display equations. Set hasMath: true.
+5. HIGH-QUALITY VECTOR DIAGRAM RENDERING (SVGs):
+   - If a question mentions, relies upon, or describes a visual diagram, chart, graph, or figure (such as a histogram, bar chart, line graph, coordinate plane, geometry figure, circuit schematic, physics diagram, or logic gate) AND has no external [IMG_REF_X] image attached, you MUST generate and embed a professional, high-resolution, self-contained SVG diagram directly inside stemText immediately after the question prompt!
+   - SVG TECHNICAL SPECIFICATIONS:
+     * Root element: <svg viewBox="0 0 600 320" xmlns="http://www.w3.org/2000/svg" style="background:#ffffff;border-radius:10px;border:1px solid #e2e8f0;">
+     * Clean white background with crisp border ensuring high contrast in light and dark modes.
+     * Typography: font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", font-size="12px", fill="#0f172a".
+     * FOR HISTOGRAMS & BAR CHARTS:
+       - Clear coordinate axes with X-axis at y=270, Y-axis at x=70 (stroke="#334155" stroke-width="2").
+       - Distinct horizontal gridlines at intervals (stroke="#e2e8f0" stroke-dasharray="3,3").
+       - Labeled Y-axis (e.g., "Frequency" rotated at x=25, y=160).
+       - Solid, vibrant bars: <rect x="..." y="..." width="48" height="..." rx="4" fill="#2563eb" />.
+       - Exact numeric value printed on top of each bar (fill="#1e293b" font-weight="600" text-anchor="middle").
+       - Bin/category labels centered under each bar along the X-axis.
+     * FOR LINE GRAPHS & CARTESIAN COORDINATE PLANES:
+       - Labeled X and Y axes with arrow markers (<marker id="arrow" ... />) and numbered tick marks.
+       - Gridlines with stroke="#f1f5f9".
+       - Distinct plotted line: stroke="#2563eb" stroke-width="2.5" fill="none".
+       - Circular data points: <circle cx="..." cy="..." r="4" fill="#1d4ed8" stroke="#ffffff" stroke-width="2" />.
+       - Coordinates or key values labeled clearly near critical points.
+     * FOR GEOMETRY & TRIGONOMETRY:
+       - Clear polygons/triangles with stroke="#0f172a" stroke-width="2" fill="#eff6ff".
+       - Vertices labeled A, B, C with bold letters.
+       - Angle arcs with degree labels (e.g., 30°, 45°, 90° right-angle symbol).
+       - Side lengths and dimensions labeled along edges.
+     * FOR CIRCUITS, LOGIC GATES & SCHEMATICS:
+       - Schematic lines with standard symbols for resistors, batteries, switches, logic gates.
+       - Clear node and component labels (e.g. 10 Ω, 12 V).
+   - JSON FORMATTING:
+     * All quotes inside the SVG within JSON must be properly escaped (e.g., \\" or single quotes).
+     * Do not include raw newlines inside the JSON string; use standard \\n.
+6. DIFFICULTY: Use EASY, MEDIUM, or HARD.
+7. Return strictly valid, parseable JSON with NO Markdown fences or chat commentary.
 `;
 
   private static readonly generationPrompt = `
-You are an expert examination board creating and verifying a multiple-choice question bank.
+You are an expert university examination board creating a comprehensive, high-standard multiple-choice question bank.
 
-If the document contains usable questions, extract and verify them. If it contains syllabus, lecture notes, or text but no MCQs, author a high-quality set of verified MCQs (aim for 5–20 questions).
+Generate verified multiple-choice questions covering key concepts in the document.
 
-Return exactly one JSON object:
+Return exactly one valid JSON object:
 {
   "questions": [
     {
@@ -152,11 +186,13 @@ Return exactly one JSON object:
 }
 
 STRICT QUESTION QUALITY & VERIFICATION RULES:
-1. ACCURACY VERIFICATION: Every question must be verified for 100% academic accuracy. Ensure the question prompt is clear and grammatically sound.
-2. PROPERLY ANSWERED: Every question MUST have EXACTLY ONE unambiguously correct answer marked isCorrect: true, and all other distractors marked isCorrect: false. Distractors must be plausible yet definitely incorrect.
-3. EXPLANATIONS: Include an explanation verifying the scientific, mathematical, or factual basis for the correct answer.
-4. MATHEMATICAL FORMULAS & LATEX: For any mathematical notation, variables, algebraic expressions, powers, square roots, fractions, limits, integrals, or chemical notations, use standard LaTeX enclosed in single dollar signs $...$ for inline formulas (e.g. $y = 2x$, $\\frac{a}{b}$, $x^2 + y^2 = 25$, $\\sqrt{x}$) or double dollar signs $$...$$ for display formulas.
-5. DIAGRAM RENDERING: If the question involves geometry, trigonometry, Cartesian coordinates, circuits, logic diagrams, physics setups, chemical structures, biological cells, or data charts, generate and embed an inline, self-contained SVG diagram <svg viewBox="0 0 500 140" xmlns="http://www.w3.org/2000/svg">...</svg> in the stemText immediately following the prompt text. The SVG must be clean, use standard shapes (<rect>, <circle>, <line>, <path>, <polygon>, <text>) and appropriate stroke/fill colors that render crisply.
+1. ACADEMIC RIGOR & ACCURACY: Ensure every question is clear, unambiguous, and grammatically impeccable.
+2. EXACTLY ONE CORRECT ANSWER: Exactly one option must have isCorrect: true. Distractors must be plausible but definitively incorrect.
+3. EXPLANATIONS: Provide an insightful explanation proving why the correct option is true and others are false.
+4. MATHEMATICAL FORMULAS & LATEX: Use $...$ for inline math and $$...$$ for block math. Set hasMath: true whenever math occurs.
+5. HIGH-QUALITY VECTOR DIAGRAMS (SVGs):
+   - Generate and embed self-contained, high-resolution vector SVGs in stemText (<svg viewBox="0 0 600 320" xmlns="http://www.w3.org/2000/svg" style="background:#ffffff;border-radius:10px;border:1px solid #e2e8f0;">...</svg>) for any question covering data interpretation, histograms, bar charts, line graphs, geometry, trigonometry, circuit diagrams, or physics setups.
+   - Follow the detailed SVG specifications: clear axes, visible gridlines, labeled data points, crisp contrasting colors, and clean typography.
 6. Format options with zero-based positions (0 to 3 for standard 4-option MCQs).
 7. Return valid JSON only with no Markdown wrapping or conversational text.
 `;
@@ -167,7 +203,7 @@ STRICT QUESTION QUALITY & VERIFICATION RULES:
     this.assertConfigured();
     if (!text || !text.trim()) throw new Error('No readable exam text was extracted.');
 
-    const chunks = this.splitText(text, this.CHUNK_SIZE, this.CHUNK_OVERLAP);
+    const chunks = this.splitText(text, this.CHUNK_SIZE);
     const all: ExtractedQuestion[] = [];
 
     console.log(`[AI] Extraction started. Source: ${text.length} chars; chunks: ${chunks.length}; provider: ${this.providerName()}`);
@@ -539,28 +575,80 @@ ${JSON.stringify(questions)}`;
     return this.validateQuestions((parsed as { questions: unknown[] }).questions);
   }
 
-  private static splitText(text: string, maxLength: number, overlap: number): string[] {
+  private static splitText(text: string, maxLength: number): string[] {
     const source = text.trim();
     if (!source) return [];
+    // If the entire text fits within reasonable token limits, process in a single unified prompt.
+    // This gives modern LLMs complete question context and guarantees question counts match 100%.
     if (source.length <= maxLength) return [source];
 
-    const chunks: string[] = [];
-    let start = 0;
-    while (start < source.length) {
-      let end = Math.min(start + maxLength, source.length);
-      if (end < source.length) {
-        const newline = source.lastIndexOf('\n', end);
-        const space = source.lastIndexOf(' ', end);
-        if (newline > start + maxLength * 0.55) end = newline;
-        else if (space > start + maxLength * 0.65) end = space;
-      }
-      if (end <= start) end = Math.min(start + maxLength, source.length);
-      const chunk = source.slice(start, end).trim();
-      if (chunk) chunks.push(chunk);
-      if (end >= source.length) break;
-      start = Math.max(start + 1, end - overlap);
+    return this.splitIntoQuestionChunks(source, maxLength);
+  }
+
+  /**
+   * Splits an examination text strictly at whole-question boundaries without overlap.
+   * This completely prevents questions from being sliced in half or duplicated across chunks.
+   */
+  private static splitIntoQuestionChunks(source: string, targetChunkLength: number): string[] {
+    // Regex matching question delimiters like:
+    // "1.", "1)", "Question 1:", "Q1.", "(1)"
+    const questionRegex = /(?:^|\n)\s*(?:(?:Question|Q)\s*\.?\s*\d+|\(?\d{1,3}\s*[\.\)]|\([a-z]\))\s+/gi;
+
+    const matches: number[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = questionRegex.exec(source)) !== null) {
+      matches.push(match.index);
     }
-    return chunks;
+
+    // If multiple clear question delimiters are found, partition cleanly along those boundaries
+    if (matches.length >= 2) {
+      const chunks: string[] = [];
+      let chunkStart = 0;
+
+      for (let i = 1; i < matches.length; i++) {
+        const potentialEnd = matches[i];
+        if (potentialEnd - chunkStart >= targetChunkLength) {
+          const slice = source.slice(chunkStart, potentialEnd).trim();
+          if (slice) chunks.push(slice);
+          chunkStart = potentialEnd;
+        }
+      }
+
+      const lastSlice = source.slice(chunkStart).trim();
+      if (lastSlice) chunks.push(lastSlice);
+      return chunks;
+    }
+
+    // Fallback: split on paragraph boundaries (double newlines) without overlap
+    const paragraphs = source.split(/\n\s*\n/);
+    const chunks: string[] = [];
+    let current = '';
+
+    for (const para of paragraphs) {
+      const trimmed = para.trim();
+      if (!trimmed) continue;
+      if (current.length + trimmed.length + 2 > targetChunkLength && current.length > 0) {
+        chunks.push(current.trim());
+        current = trimmed;
+      } else {
+        current = current ? `${current}\n\n${trimmed}` : trimmed;
+      }
+    }
+
+    if (current.trim()) chunks.push(current.trim());
+    return chunks.length ? chunks : [source];
+  }
+
+  private static repairJsonWithSvg(jsonStr: string): string {
+    // Replace unescaped newlines inside JSON string literals
+    let result = jsonStr.replace(/"([^"\\]*(?:\\.[^"\\]*)*)"/g, (match) => {
+      return match.replace(/\r?\n/g, '\\n').replace(/\t/g, ' ');
+    });
+    // Fix unescaped quotes inside XML/SVG attributes in JSON
+    result = result.replace(/(<svg[\s\S]*?<\/svg>)/gi, (svgBlock) => {
+      return svgBlock.replace(/=(["][^"]*["])/g, (attr) => attr.replace(/"/g, '\\"'));
+    });
+    return result;
   }
 
   private static parseModelResponse(response: unknown): unknown {
@@ -571,24 +659,26 @@ ${JSON.stringify(questions)}`;
         .replace(/\s*```$/i, '')
         .trim();
       if (!cleaned) throw new Error('The AI returned an empty response.');
+
       try {
-        value = JSON.parse(cleaned);
-      } catch (error) {
+        return JSON.parse(cleaned);
+      } catch {
         const firstBrace = cleaned.indexOf('{');
         const lastBrace = cleaned.lastIndexOf('}');
         if (firstBrace !== -1 && lastBrace > firstBrace) {
+          const sliced = cleaned.slice(firstBrace, lastBrace + 1);
           try {
-            value = JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+            return JSON.parse(sliced);
           } catch {
-            throw new Error(
-              `The AI returned invalid or incomplete JSON: ${error instanceof Error ? error.message : String(error)}`,
-            );
+            try {
+              const repaired = this.repairJsonWithSvg(sliced);
+              return JSON.parse(repaired);
+            } catch (err: any) {
+              console.warn('[AI] JSON repair failed:', err?.message);
+            }
           }
-        } else {
-          throw new Error(
-            `The AI returned invalid or incomplete JSON: ${error instanceof Error ? error.message : String(error)}`,
-          );
         }
+        throw new Error('The AI returned invalid or incomplete JSON.');
       }
     }
     if (typeof value === 'object' && value !== null && !Array.isArray(value) && 'response' in value) {
@@ -671,18 +761,74 @@ ${JSON.stringify(questions)}`;
     return validated;
   }
 
+  private static normalizeStemForComparison(stem: string): string {
+    return stem
+      .replace(/<svg[\s\S]*?<\/svg>/gi, '')
+      .replace(/```(?:svg|xml)?[\s\S]*?```/gi, '')
+      .replace(/^\s*(?:question\s+)?(?:\d+|[ivxlcdm]+)[\.\)\:\-]\s*/i, '')
+      .replace(/\[IMG_REF_\d+\]/gi, '')
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim();
+  }
+
   private static removeDuplicateQuestions(questions: ExtractedQuestion[]): ExtractedQuestion[] {
-    const seen = new Set<string>();
     const unique: ExtractedQuestion[] = [];
-    for (const question of questions) {
-      const key = question.stemText
-        .toLocaleLowerCase()
-        .replace(/[^\p{L}\p{N}]+/gu, ' ')
-        .trim();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      unique.push(question);
+
+    for (const q of questions) {
+      const normStem = this.normalizeStemForComparison(q.stemText);
+      if (!normStem) continue;
+
+      const stemSig = normStem.slice(0, 100);
+
+      // Check if duplicate already exists in unique
+      let dupIndex = -1;
+      for (let i = 0; i < unique.length; i++) {
+        const existing = unique[i];
+        const existingNorm = this.normalizeStemForComparison(existing.stemText);
+        const existingSig = existingNorm.slice(0, 100);
+
+        if (stemSig === existingSig) {
+          dupIndex = i;
+          break;
+        }
+
+        // Fuzzy similarity: stems share 35+ chars prefix and share answer options
+        if (
+          stemSig.length >= 35 &&
+          existingSig.length >= 35 &&
+          (stemSig.startsWith(existingSig.slice(0, 45)) || existingSig.startsWith(stemSig.slice(0, 45)))
+        ) {
+          const matchCount = q.options.filter((o) =>
+            existing.options.some(
+              (eo) =>
+                eo.text.toLowerCase().trim() === o.text.toLowerCase().trim() &&
+                o.text.trim().length > 1,
+            ),
+          ).length;
+          if (matchCount >= 2) {
+            dupIndex = i;
+            break;
+          }
+        }
+      }
+
+      if (dupIndex === -1) {
+        unique.push(q);
+      } else {
+        // If the new duplicate has an SVG diagram and existing does not, upgrade to the version with the diagram!
+        const existing = unique[dupIndex];
+        const newHasSvg = /<svg[\s\S]*?<\/svg>/i.test(q.stemText);
+        const existingHasSvg = /<svg[\s\S]*?<\/svg>/i.test(existing.stemText);
+
+        if (newHasSvg && !existingHasSvg) {
+          unique[dupIndex] = q;
+        } else if (!existing.explanation && q.explanation) {
+          existing.explanation = q.explanation;
+        }
+      }
     }
+
     return unique;
   }
 }

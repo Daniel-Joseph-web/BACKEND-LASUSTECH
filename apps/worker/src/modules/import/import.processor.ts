@@ -24,7 +24,13 @@ interface PreparedQuestion extends InternalParsedQuestion {
 }
 
 function cleanText(value: string): string {
-  return value.replace(/\[IMG_REF_\d+\]/g, '').replace(/\s+/g, ' ').trim();
+  if (!value) return '';
+  return value
+    .replace(/\[IMG_REF_\d+\]/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 function sourceExplanation(original: string | undefined, note: string): string {
@@ -445,22 +451,40 @@ function mapAiQuestions(
   questions: Awaited<ReturnType<typeof CloudflareAiService.extractQuestionsFromText>>,
   placeholderToMediaIdMap: Map<string, string>,
 ): PreparedQuestion[] {
-  return questions.map((question) => ({
-    stemText: question.stemText,
-    stemMediaId: question.stemPlaceholder
-      ? placeholderToMediaIdMap.get(question.stemPlaceholder)
-      : undefined,
-    difficulty: question.difficulty,
-    hasMath: question.hasMath,
-    explanation: question.explanation ?? undefined,
-    answerSource: 'SOURCE' as const,
-    options: question.options.map((option) => ({
-      position: option.position,
-      text: option.text,
-      mediaId: option.mediaPlaceholder
-        ? placeholderToMediaIdMap.get(option.mediaPlaceholder)
-        : undefined,
-      isCorrect: option.isCorrect,
-    })),
-  }));
+  return questions.map((question, qIdx) => {
+    let placeholder = question.stemPlaceholder;
+    if (!placeholder) {
+      const match = question.stemText.match(/\[IMG_REF_(\d+)\]/);
+      if (match) placeholder = match[0];
+    }
+
+    const stemMediaId = placeholder
+      ? placeholderToMediaIdMap.get(placeholder)
+      : placeholderToMediaIdMap.get(`[IMG_REF_${qIdx}]`);
+
+    return {
+      stemText: question.stemText,
+      stemMediaId: stemMediaId ?? undefined,
+      difficulty: question.difficulty,
+      hasMath:
+        question.hasMath ||
+        /<svg[\s\S]*?<\/svg>/i.test(question.stemText) ||
+        /\$|\\\(|\\\[/.test(question.stemText),
+      explanation: question.explanation ?? undefined,
+      answerSource: 'SOURCE' as const,
+      options: question.options.map((option) => {
+        let optPlaceholder = option.mediaPlaceholder;
+        if (!optPlaceholder) {
+          const match = option.text.match(/\[IMG_REF_(\d+)\]/);
+          if (match) optPlaceholder = match[0];
+        }
+        return {
+          position: option.position,
+          text: option.text,
+          mediaId: optPlaceholder ? placeholderToMediaIdMap.get(optPlaceholder) : undefined,
+          isCorrect: option.isCorrect,
+        };
+      }),
+    };
+  });
 }
