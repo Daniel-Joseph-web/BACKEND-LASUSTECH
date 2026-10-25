@@ -377,9 +377,9 @@ export const createExam = async (req: Request, res: Response) => {
 
       const lecturerName = (req as any).user?.names || 'A lecturer';
       await notifyUsers(tx, adminUserIds, {
-        type: 'OFFICER_APPROVAL',
-        title: `New Exam Created: ${created.title}`,
-        body: `Lecturer ${lecturerName} created exam "${created.title}" (${courseLabel}). Click to schedule sitting.`,
+        type: 'SYSTEM',
+        title: `New Exam Live: ${created.title}`,
+        body: `Lecturer ${lecturerName} published exam "${created.title}" (${courseLabel}). Questions are live and ready for sitting scheduling.`,
         meta: {
           kind: 'EXAM_CREATED',
           examId: created.id,

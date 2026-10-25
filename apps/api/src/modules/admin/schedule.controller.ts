@@ -361,20 +361,6 @@ export const createSitting = async (req: Request, res: Response) => {
     ...departmentStudents.map((d) => d.id),
   ]);
 
-  if (candidateIdSet.size === 0) {
-    const defaultStudents = await prisma.user.findMany({
-      where: {
-        roles: { some: { role: { key: 'STUDENT' } } },
-        status: 'ACTIVE',
-      },
-      select: { id: true },
-      take: 200,
-    });
-    for (const s of defaultStudents) {
-      candidateIdSet.add(s.id);
-    }
-  }
-
   const candidates = [...candidateIdSet].map((studentId) => ({ studentId }));
 
   const accessCode = generateAccessCode();

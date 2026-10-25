@@ -286,6 +286,20 @@ export async function getStudentDashboard(userId: string) {
     // If the exam is no longer approved or locked, skip it
     if (exam.status !== 'APPROVED' && exam.status !== 'LOCKED') continue;
 
+    // Strict enrolled course filtering:
+    // If exam is attached to a course, student MUST be enrolled in that course.
+    // e.g. Accounting students only see accounting exams, not computer science exams!
+    if (exam.courseId) {
+      if (courseIds.length > 0 && !courseIds.includes(exam.courseId)) {
+        continue;
+      }
+      if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id) {
+        continue;
+      }
+    } else if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id) {
+      continue;
+    }
+
     const courseCode = exam.course?.code || exam.title;
     const courseTitle = exam.course?.title || exam.title;
     const unit = exam.course?.units || 3;
@@ -1208,9 +1222,28 @@ export async function getStudentResults(userId: string) {
     });
   }
 
+  const dbSessions = await prisma.academicSession.findMany({
+    select: { name: true, isCurrent: true },
+    orderBy: { startsOn: 'desc' },
+  });
+  const sessionSet = new Set<string>();
+  for (const r of list) {
+    if (r.session) sessionSet.add(r.session);
+  }
+  const currentDbSession = dbSessions.find((s) => s.isCurrent)?.name;
+  if (currentDbSession && list.some((r) => r.session === currentDbSession)) {
+    sessionSet.add(currentDbSession);
+  }
+  if (sessionSet.size === 0 && currentDbSession) {
+    sessionSet.add(currentDbSession);
+  }
+  const availableSessions = Array.from(sessionSet);
+
   return {
     student,
     results: list,
+    availableSessions,
+    currentSession: currentDbSession || availableSessions[0] || undefined,
     summary: {
       totalCourses: list.length,
       passedCourses: list.filter((l) => l.passed).length,
