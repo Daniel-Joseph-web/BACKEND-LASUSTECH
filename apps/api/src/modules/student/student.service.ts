@@ -5,6 +5,7 @@ import { Errors } from '../../lib/errors';
 import { mediaUrl, mediaView } from '../../lib/media';
 import { getGroup } from '../../lib/settings';
 import { readSelectedPositions, scoreAttempt, ScoreSummary } from '../public-exams/scoring';
+import { buildAttemptScriptPayload } from '../admin/results.controller';
 
 import { publishRealtimeEvent } from '../../lib/realtime';
 import { notifyUsers } from '../../lib/notify';
@@ -287,16 +288,18 @@ export async function getStudentDashboard(userId: string) {
     if (exam.status !== 'APPROVED' && exam.status !== 'LOCKED') continue;
 
     // Strict enrolled course filtering:
-    // If exam is attached to a course, student MUST be enrolled in that course.
-    // e.g. Accounting students only see accounting exams, not computer science exams!
+    // A student who didn't take or was not assigned to a course can NEVER see or write the exam.
+    // e.g. Accounting students only see accounting exams, never computer science exams.
     if (exam.courseId) {
-      if (courseIds.length > 0 && !courseIds.includes(exam.courseId)) {
+      const isEnrolled = courseIds.includes(exam.courseId);
+      const isExplicitlySeated = s.students.length > 0;
+      if (!isEnrolled && !isExplicitlySeated) {
         continue;
       }
-      if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id) {
+      if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id && !isExplicitlySeated) {
         continue;
       }
-    } else if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id) {
+    } else if (exam.course?.departmentId && student.department?.id && exam.course.departmentId !== student.department.id && !s.students.length) {
       continue;
     }
 
@@ -500,6 +503,27 @@ export async function getSittingDetails(userId: string, sittingId: string) {
   });
 
   if (!sitting) throw Errors.notFound('Sitting');
+
+  // Strict course assignment check: A student who didn't take the course can NEVER write the exam.
+  if (sitting.exam.courseId) {
+    const isExplicitlySeated = sitting.students.length > 0;
+    if (!isExplicitlySeated) {
+      const [enrollment, courseAssign] = await Promise.all([
+        prisma.enrollment.findFirst({
+          where: { studentId: userId, courseId: sitting.exam.courseId, status: 'ACTIVE' },
+        }),
+        prisma.courseAssignment.findFirst({
+          where: { userId, courseId: sitting.exam.courseId },
+        }),
+      ]);
+      if (!enrollment && !courseAssign) {
+        throw Errors.forbidden(
+          'COURSE_NOT_ASSIGNED',
+          'You are not enrolled in or assigned to this course and are not permitted to write this examination.',
+        );
+      }
+    }
+  }
   if (sitting.status === 'CANCELLED') {
     throw Errors.conflict('SITTING_CANCELLED', 'This examination sitting has been cancelled.');
   }
@@ -508,6 +532,27 @@ export async function getSittingDetails(userId: string, sittingId: string) {
   }
   if (sitting.exam.status !== 'APPROVED' && sitting.exam.status !== 'LOCKED') {
     throw Errors.conflict('EXAM_NOT_ACTIVE', 'This examination is currently disabled or not published.');
+  }
+
+  // Strict course assignment check: A student who didn't take the course can NEVER access or write the exam.
+  if (sitting.exam.courseId) {
+    const isExplicitlySeated = sitting.students.length > 0;
+    if (!isExplicitlySeated) {
+      const [enrollment, courseAssign] = await Promise.all([
+        prisma.enrollment.findFirst({
+          where: { studentId: userId, courseId: sitting.exam.courseId, status: 'ACTIVE' },
+        }),
+        prisma.courseAssignment.findFirst({
+          where: { userId, courseId: sitting.exam.courseId },
+        }),
+      ]);
+      if (!enrollment && !courseAssign) {
+        throw Errors.forbidden(
+          'COURSE_NOT_ASSIGNED',
+          'You are not enrolled in or assigned to this course and are not permitted to write this examination.',
+        );
+      }
+    }
   }
 
   const [examSettings, generalSettings] = await Promise.all([
@@ -648,6 +693,27 @@ export async function startSittingAttempt(
   });
 
   if (!sitting) throw Errors.notFound('Sitting');
+
+  // Strict course assignment check: A student who didn't take the course can NEVER write the exam.
+  if (sitting.exam.courseId) {
+    const isExplicitlySeated = sitting.students.length > 0;
+    if (!isExplicitlySeated) {
+      const [enrollment, courseAssign] = await Promise.all([
+        prisma.enrollment.findFirst({
+          where: { studentId: userId, courseId: sitting.exam.courseId, status: 'ACTIVE' },
+        }),
+        prisma.courseAssignment.findFirst({
+          where: { userId, courseId: sitting.exam.courseId },
+        }),
+      ]);
+      if (!enrollment && !courseAssign) {
+        throw Errors.forbidden(
+          'COURSE_NOT_ASSIGNED',
+          'You are not enrolled in or assigned to this course and are not permitted to write this examination.',
+        );
+      }
+    }
+  }
 
   const [generalSettings, examSettings] = await Promise.all([
     getGroup('general'),
@@ -1179,6 +1245,7 @@ export async function getStudentResults(userId: string) {
   type ResultItem = {
     code: string;
     title: string;
+    attemptId?: string;
     examScore: number;
     rawScore: number;
     maxScore: number;
@@ -1207,6 +1274,7 @@ export async function getStudentResults(userId: string) {
     list.push({
       code: course?.code || exam.title,
       title: course?.title || exam.title,
+      attemptId: r.attempt.id,
       examScore: percent,
       rawScore,
       maxScore,
@@ -1357,4 +1425,34 @@ export async function recordAttemptEvent(
   }
 
   return { success: true };
+}
+
+export async function getStudentAttemptScript(userId: string, attemptId: string) {
+  const attempt = await prisma.attempt.findUnique({
+    where: { id: attemptId },
+    include: {
+      sitting: true,
+      results: {
+        where: { isCurrent: true },
+        select: { status: true },
+      },
+    },
+  });
+
+  if (!attempt || attempt.studentId !== userId) {
+    throw Errors.notFound('Attempt');
+  }
+
+  const examSettings = await getGroup('exam');
+  const allowImmediate = Boolean(examSettings.immediateResultDisplay);
+  const isReleased = attempt.results.some((r) => r.status === 'RELEASED');
+
+  if (!allowImmediate && !isReleased) {
+    throw Errors.forbidden(
+      'RESULT_NOT_RELEASED',
+      'The examination script cannot be reviewed until official results are released by the administrator.',
+    );
+  }
+
+  return await buildAttemptScriptPayload(attemptId);
 }

@@ -106,3 +106,11 @@ export const getResults = async (req: Request, res: Response) => {
   const data = await studentService.getStudentResults(userId);
   res.json({ data });
 };
+
+export const getAttemptScript = async (req: Request, res: Response) => {
+  const userId = req.auth?.userId;
+  if (!userId) throw Errors.tokenExpired();
+  const attemptId = req.params.attemptId ? uuidParam(req, 'attemptId') : uuidParam(req);
+  const data = await studentService.getStudentAttemptScript(userId, attemptId);
+  res.json({ data });
+};

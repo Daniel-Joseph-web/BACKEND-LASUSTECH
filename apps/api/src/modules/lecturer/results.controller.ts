@@ -155,7 +155,7 @@ export const exportExamResultsCsv = async (req: Request, res: Response) => {
 
 // --- 3. Script inspection (Read-Only) ---
 export const getLecturerAttemptScript = async (req: Request, res: Response) => {
-  const attemptId = uuidParam(req);
+  const attemptId = req.params.attemptId ? uuidParam(req, 'attemptId') : uuidParam(req);
   const actor = actorFrom(req, res);
 
   const attempt = await prisma.attempt.findUnique({

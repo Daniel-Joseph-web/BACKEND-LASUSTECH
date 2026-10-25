@@ -17,3 +17,4 @@ studentRouter.post('/attempts/:id/events', candidateExamRateLimiter, controller.
 studentRouter.post('/attempts/:id/answer', candidateExamRateLimiter, controller.saveAnswer);
 studentRouter.post('/attempts/:id/answers', candidateExamRateLimiter, controller.saveAnswer);
 studentRouter.post('/attempts/:id/submit', candidateExamRateLimiter, controller.submitAttempt);
+studentRouter.get('/attempts/:id/script', controller.getAttemptScript);

@@ -153,6 +153,9 @@ async function loadSitting(sittingId: string) {
     where: { id: sittingId },
     select: {
       id: true,
+      status: true,
+      startsAt: true,
+      endsAt: true,
       exam: { select: { title: true, course: { select: { code: true, title: true } } } },
     },
   });
@@ -217,6 +220,25 @@ export const releaseResults = async (req: Request, res: Response) => {
   const sittingId = uuidParam(req);
   const actor = actorFrom(req, res);
   const { sitting } = await loadSitting(sittingId);
+
+  // Guard: results can ONLY be released after the exam has officially concluded.
+  const now = new Date();
+  if (now < sitting.endsAt && sitting.status !== 'CLOSED') {
+    throw Errors.badRequest(
+      'EXAM_NOT_CONCLUDED',
+      `Results cannot be released while the examination is still active or ongoing. The exam is scheduled until ${sitting.endsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Results can only be released after the exam has concluded.`,
+    );
+  }
+
+  const activeAttempts = await prisma.attempt.count({
+    where: { sittingId, status: 'IN_PROGRESS' },
+  });
+  if (activeAttempts > 0 && now < sitting.endsAt) {
+    throw Errors.badRequest(
+      'CANDIDATES_ACTIVE',
+      `There are currently ${activeAttempts} candidate(s) still writing this examination. Results cannot be released until all candidate sittings have concluded.`,
+    );
+  }
 
   const batch = await prisma.$transaction(async (tx) => {
     const existing = await tx.resultBatch.findUnique({ where: { sittingId } });
@@ -565,23 +587,31 @@ export async function buildAttemptScriptPayload(attemptId: string) {
     const marksAwarded = isCorrect ? weightedMarks : 0;
 
     const options = version.options.map((opt) => {
-      const body = opt.body as { text?: string } | null;
+      const rawBody = opt.body as any;
+      const optText =
+        typeof rawBody === 'string'
+          ? rawBody
+          : (rawBody?.text ?? rawBody?.html ?? rawBody?.label ?? '');
       return {
         id: opt.id,
         position: opt.position,
-        text: body?.text ?? '',
+        text: optText,
         isCorrect: opt.isCorrect,
         isSelected: selectedPositions.has(opt.position),
       };
     });
 
-    const stem = version.stem as { text?: string } | null;
+    const rawStem = version.stem as any;
+    const stemText =
+      typeof rawStem === 'string'
+        ? rawStem
+        : (rawStem?.text ?? rawStem?.html ?? rawStem?.markdown ?? '');
 
     return {
       questionNo: idx + 1,
       questionId: version.questionId,
       versionId: version.id,
-      stem: stem?.text ?? '',
+      stem: stemText,
       topicName: version.topic?.name ?? 'General',
       difficulty: version.difficulty,
       weightedMarks,
@@ -777,7 +807,7 @@ export const overrideScore = async (req: Request, res: Response) => {
 };
 
 export const getAttemptScript = async (req: Request, res: Response) => {
-  const attemptId = uuidParam(req);
+  const attemptId = req.params.attemptId ? uuidParam(req, 'attemptId') : uuidParam(req);
   const payload = await buildAttemptScriptPayload(attemptId);
   res.json({ data: payload });
 };

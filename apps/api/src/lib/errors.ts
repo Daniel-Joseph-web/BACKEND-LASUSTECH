@@ -15,7 +15,8 @@ export const Errors = {
   locked: (retryAfterSec: number) =>
     new AppError(423, 'AUTH_LOCKED', 'Account locked. Try again later.', { retryAfterSec }),
   tokenExpired: () => new AppError(401, 'AUTH_TOKEN_EXPIRED', 'Session expired.'),
-  forbidden: () => new AppError(403, 'FORBIDDEN', 'You do not have access to this resource.'),
+  forbidden: (code = 'FORBIDDEN', message = 'You do not have access to this resource.', details?: Record<string, unknown>) =>
+    new AppError(403, code, message, details),
   maintenance: () =>
     new AppError(503, 'MAINTENANCE', 'The system is under maintenance. Please try again later.'),
   serviceUnavailable: (code: string, message: string, details?: Record<string, unknown>) =>
