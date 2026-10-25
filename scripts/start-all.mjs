@@ -43,7 +43,9 @@ startProcess('Realtime-WebSocket-Engine', 'apps/realtime/src/main.ts', {
 });
 
 // 2. Launch Background Queue Worker
-startProcess('Background-Import-Worker', 'apps/worker/src/main.ts');
+startProcess('Background-Import-Worker', 'apps/worker/src/main.ts', {
+  PORT: '3003',
+});
 
 // 3. Launch Main Public REST API on port 3001
 startProcess('Public-REST-API', 'apps/api/src/main.ts', {
