@@ -929,22 +929,33 @@ export const bulkUsers = async (req: Request, res: Response) => {
 
 // ---------- CSV import (rows are parsed in the browser) ----------
 const importBody = z.object({
-  rows: z.array(z.record(z.string(), z.unknown())).min(1).max(200),
+  rows: z.array(z.record(z.string(), z.unknown())).min(1).max(2000),
   dryRun: z.boolean().default(false),
+  defaultDepartmentId: z.preprocess(blankToUndef, z.string().uuid().optional()),
+  defaultLevel: z.preprocess(blankToUndef, z.coerce.number().int().min(100).max(900).optional()),
 });
 
 const importRow = z.object({
   names: z.string().trim().min(2).max(120),
-  role: z
-    .string()
-    .trim()
-    .transform((s) => s.toUpperCase().replace(/[\s-]+/g, '_'))
-    .transform((s) => (s === 'ADMINISTRATOR' ? 'ADMIN' : s))
-    .pipe(z.enum(ROLES)),
+  role: z.preprocess(
+    (v) => (v === undefined || v === null || String(v).trim() === '' ? undefined : v),
+    z
+      .string()
+      .trim()
+      .transform((s) => s.toUpperCase().replace(/[\s-]+/g, '_'))
+      .transform((s) => (s === 'ADMINISTRATOR' ? 'ADMIN' : s))
+      .pipe(z.enum(ROLES))
+      .optional(),
+  ),
   matricNo: optUpper(40),
   staffId: optUpper(40),
   email: optEmail,
+  phone: optStr(30),
   department: optStr(120),
+  level: z.preprocess(
+    (v) => (v === undefined || v === null || String(v).trim() === '' ? undefined : v),
+    z.coerce.number().int().min(100).max(900).optional(),
+  ),
   /** Optional. Students ignore this and use surname+matric unless you want to override. */
   password: z.preprocess(blankToUndef, z.string().min(8).max(100).optional()),
 });
@@ -954,16 +965,28 @@ export const importUsers = async (req: Request, res: Response) => {
   const depts = await prisma.department.findMany({
     select: { id: true, code: true, name: true },
   });
-  const deptFor = (s?: string) =>
-    s
-      ? depts.find(
-          (d) =>
-            d.code.toLowerCase() === s.toLowerCase() || d.name.toLowerCase() === s.toLowerCase(),
-        )
-      : undefined;
+  const deptFor = (s?: string) => {
+    if (!s) return undefined;
+    const clean = s.trim().toLowerCase();
+    // 1. Exact match on code
+    const byCode = depts.find((d) => d.code.toLowerCase() === clean);
+    if (byCode) return byCode;
+    // 2. Exact match on name
+    const byName = depts.find((d) => d.name.toLowerCase() === clean);
+    if (byName) return byName;
+    // 3. Substring match
+    const bySub = depts.find(
+      (d) =>
+        clean.includes(d.code.toLowerCase()) ||
+        d.name.toLowerCase().includes(clean) ||
+        clean.includes(d.name.toLowerCase()),
+    );
+    if (bySub) return bySub;
+    return undefined;
+  };
 
   const failed: { row: number; reason: string }[] = [];
-  const valid: { row: number; v: z.infer<typeof importRow>; departmentId?: string }[] = [];
+  const valid: { row: number; v: z.infer<typeof importRow> & { role: RoleKey }; departmentId?: string }[] = [];
   const seen = {
     matric: new Set<string>(),
     staff: new Set<string>(),
@@ -980,7 +1003,11 @@ export const importUsers = async (req: Request, res: Response) => {
         reason: `${is.path.join('.') || 'row'}: ${is.message}`,
       });
     }
-    const v = p.data;
+    const rawV = p.data;
+    // Determine effective role
+    const effectiveRole: RoleKey = rawV.role ?? (rawV.matricNo ? 'STUDENT' : rawV.staffId ? 'LECTURER' : 'STUDENT');
+    const v = { ...rawV, role: effectiveRole };
+
     const issue = identityIssue({
       roles: [v.role],
       matricNo: v.matricNo,
@@ -988,10 +1015,13 @@ export const importUsers = async (req: Request, res: Response) => {
       email: v.email,
     });
     if (issue) return void failed.push({ row, reason: issue.message });
-    const dept = deptFor(v.department);
-    if (v.department && !dept) {
+
+    let dept = deptFor(v.department);
+    let deptId = dept?.id || body.defaultDepartmentId;
+    if (v.department && !dept && !body.defaultDepartmentId) {
       return void failed.push({ row, reason: `Unknown department "${v.department}"` });
     }
+
     for (const [set, val, label] of [
       [seen.matric, v.matricNo, 'matric number'],
       [seen.staff, v.staffId, 'staff ID'],
@@ -1004,7 +1034,7 @@ export const importUsers = async (req: Request, res: Response) => {
     if (v.matricNo) seen.matric.add(v.matricNo);
     if (v.staffId) seen.staff.add(v.staffId);
     if (v.email) seen.email.add(v.email);
-    valid.push({ row, v, departmentId: dept?.id });
+    valid.push({ row, v, departmentId: deptId });
   });
 
   // duplicates against existing users
@@ -1116,6 +1146,7 @@ export const importUsers = async (req: Request, res: Response) => {
               where: { departmentId: deptId, active: true },
               select: { id: true },
             });
+            const effectiveLevel = r.v.level ?? body.defaultLevel ?? 100;
             if (prog) {
               const yearMatch = r.v.matricNo?.match(/\b(20\d{2})\b/);
               const admissionYear = yearMatch ? parseInt(yearMatch[1], 10) : new Date().getFullYear();
@@ -1124,35 +1155,46 @@ export const importUsers = async (req: Request, res: Response) => {
                 create: {
                   userId: u.id,
                   programmeId: prog.id,
-                  level: 100,
+                  level: effectiveLevel,
                   admissionYear,
                 },
                 update: {
                   programmeId: prog.id,
+                  level: effectiveLevel,
                 },
               });
             }
 
-            // Auto-enroll student into all active courses for their department in the current session
+            // Auto-enroll student into active courses for their department and level
             let enrollSession = await tx.academicSession.findFirst({
               where: { isCurrent: true },
               select: { id: true },
             });
             if (!enrollSession) {
-              enrollSession = await tx.academicSession.findFirst({
+              enrollSession = (await tx.academicSession.findFirst({
                 where: { closedAt: null },
                 orderBy: { startsOn: 'desc' },
                 select: { id: true },
-              }) || await tx.academicSession.findFirst({
+              })) || (await tx.academicSession.findFirst({
                 orderBy: { startsOn: 'desc' },
                 select: { id: true },
-              });
+              }));
             }
             if (enrollSession) {
-              const deptCourses = await tx.course.findMany({
-                where: { departmentId: deptId, active: true },
+              let deptCourses = await tx.course.findMany({
+                where: {
+                  departmentId: deptId,
+                  active: true,
+                  ...(effectiveLevel ? { level: effectiveLevel } : {}),
+                },
                 select: { id: true },
               });
+              if (deptCourses.length === 0) {
+                deptCourses = await tx.course.findMany({
+                  where: { departmentId: deptId, active: true },
+                  select: { id: true },
+                });
+              }
               if (deptCourses.length > 0) {
                 await tx.enrollment.createMany({
                   data: deptCourses.map((course) => ({
