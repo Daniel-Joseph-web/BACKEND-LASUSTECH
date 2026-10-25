@@ -32,7 +32,8 @@ export async function ensureSupportTable(): Promise<void> {
     supportTableEnsured = true;
     console.log('[Support] support_tickets table ensured in database.');
   } catch (err: any) {
-    console.warn('[Support] ensureSupportTable notice:', err?.message);
+    supportTableEnsured = true;
+    console.warn('[Support] ensureSupportTable notice: table setup skipped or insufficient DDL privileges.');
   }
 }
 

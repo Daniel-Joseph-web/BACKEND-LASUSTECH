@@ -184,6 +184,8 @@ const revokeSessions = (tx: Tx, userIds: string[], reason: string) =>
     data: { revokedAt: new Date(), revokedReason: reason },
   });
 
+const TX_OPTS = { maxWait: 20000, timeout: 60000 } as const;
+
 async function hardDelete(tx: Tx, id: string) {
   // Role and permission rows are removed by ON DELETE CASCADE on users. The
   // runtime role cannot delete identity rows directly, which is the point.
@@ -192,6 +194,13 @@ async function hardDelete(tx: Tx, id: string) {
   await tx.mfaSecret.deleteMany({ where: { userId: id } });
   await tx.studentAccommodation.deleteMany({ where: { studentId: id } });
   await tx.studentProfile.deleteMany({ where: { userId: id } });
+  await tx.enrollment.deleteMany({ where: { studentId: id } });
+  await tx.courseAssignment.deleteMany({ where: { userId: id } });
+  await tx.sittingStudent.deleteMany({ where: { studentId: id } });
+  await tx.sittingInvigilator.deleteMany({ where: { userId: id } });
+  await tx.notification.deleteMany({ where: { userId: id } });
+  await tx.passwordHistory.deleteMany({ where: { userId: id } });
+  await tx.idempotencyKey.deleteMany({ where: { userId: id } });
   await tx.user.delete({ where: { id } }); // P2003 if exams/audit history
 }
 
@@ -453,7 +462,7 @@ export const createUser = async (req: Request, res: Response) => {
       after: auditView(fresh),
     });
     return fresh;
-  });
+  }, TX_OPTS);
 
   // Always return the password once when it was auto-derived or randomly generated,
   // so the admin can share it. When the admin typed it, they already know it.
@@ -525,6 +534,9 @@ export const updateUser = async (req: Request, res: Response) => {
     (leavingActive || !nextRoles.includes('ADMIN'));
   const actor = actorFrom(req, res);
 
+  // Hash password outside of transaction so CPU work does not consume database transaction time
+  const passwordHash = body.password ? await bcrypt.hash(body.password, USER_ROUNDS) : undefined;
+
   const updated = await prisma.$transaction(async (tx) => {
     if (losingAdmin) await guardAdmins(tx, [id]);
 
@@ -537,8 +549,8 @@ export const updateUser = async (req: Request, res: Response) => {
       departmentId: body.departmentId,
       status: body.status,
     };
-    if (body.password) {
-      data.passwordHash = await bcrypt.hash(body.password, USER_ROUNDS);
+    if (passwordHash) {
+      data.passwordHash = passwordHash;
       data.failedLoginCount = 0;
       data.lockedUntil = null;
     } else if (nextStatus === 'ACTIVE' && existing.status !== 'ACTIVE') {
@@ -547,7 +559,7 @@ export const updateUser = async (req: Request, res: Response) => {
     }
     await tx.user.update({ where: { id }, data });
 
-    if (body.password) {
+    if (passwordHash) {
       await revokeSessions(tx, [id], 'PASSWORD_RESET');
     }
 
@@ -648,7 +660,7 @@ export const updateUser = async (req: Request, res: Response) => {
       after: auditView(fresh),
     });
     return fresh;
-  });
+  }, TX_OPTS);
 
   res.json({ data: present(updated) });
 };
@@ -690,7 +702,7 @@ export const resetPassword = async (req: Request, res: Response) => {
       targetId: id,
       after: { names: target.names },
     });
-  });
+  }, TX_OPTS);
 
   // When admin set the password they already know it; only return random temps.
   // Optionally include student pattern hint for convenience.
@@ -730,7 +742,7 @@ export const deleteUser = async (req: Request, res: Response) => {
         targetId: id,
         before: auditView(existing),
       });
-    });
+    }, TX_OPTS);
   } catch (e) {
     if ((e as { code?: string })?.code === 'P2003') {
       throw Errors.conflict(
@@ -811,7 +823,7 @@ export const bulkUsers = async (req: Request, res: Response) => {
             after: { roles: [role] },
           });
         }
-      });
+      }, TX_OPTS);
     }
     affected = eligible.length;
   }
@@ -838,7 +850,7 @@ export const bulkUsers = async (req: Request, res: Response) => {
             after: { status: activate ? 'ACTIVE' : 'DEACTIVATED' },
           });
         }
-      });
+      }, TX_OPTS);
     }
     affected = targets.length;
   }
@@ -869,7 +881,7 @@ export const bulkUsers = async (req: Request, res: Response) => {
         targets.map((u) => u.id),
         'PASSWORD_RESET',
       );
-    });
+    }, TX_OPTS);
     credentials = hashed.map(({ u, pw }) => ({
       id: u.id,
       names: u.names,
@@ -891,7 +903,7 @@ export const bulkUsers = async (req: Request, res: Response) => {
             targetId: u.id,
             before: auditView(u),
           });
-        });
+        }, TX_OPTS);
         affected++;
       } catch (e) {
         const code = (e as { code?: string })?.code;
@@ -1048,6 +1060,8 @@ export const importUsers = async (req: Request, res: Response) => {
         allowGenerateStaff: true,
       });
 
+      const passwordHash = await bcrypt.hash(pw, generated ? TEMP_ROUNDS : USER_ROUNDS);
+
       const created = await prisma.$transaction(async (tx) => {
         const u = await tx.user.create({
           data: {
@@ -1057,7 +1071,7 @@ export const importUsers = async (req: Request, res: Response) => {
             email: r.v.email,
             departmentId: r.departmentId,
             status: 'ACTIVE',
-            passwordHash: await bcrypt.hash(pw, generated ? TEMP_ROUNDS : USER_ROUNDS),
+            passwordHash,
           },
           select: {
             id: true,
@@ -1174,7 +1188,7 @@ export const importUsers = async (req: Request, res: Response) => {
           }
         }
         return u;
-      });
+      }, TX_OPTS);
       credentials.push({
         id: created.id,
         names: created.names,
@@ -1518,7 +1532,7 @@ export const setUserCourses = async (req: Request, res: Response) => {
         after: { courseIds, sessionId: finalSession.id, isStudent: false },
       });
     }
-  });
+  }, TX_OPTS);
 
   res.json({
     data: {
