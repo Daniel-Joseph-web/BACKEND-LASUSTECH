@@ -1,5 +1,5 @@
 # LASUSTECH Computer-Based Testing (CBT) System
-# Complete Architecture & Workflows for All 32 Sub-Systems
+# Complete Architecture, Security, Deployment & Workflows for All 32 Sub-Systems
 
 > **Eraser.io Usage Instructions**:
 > 1. Open [Eraser.io](https://app.eraser.io) and create a new canvas or document.
@@ -114,7 +114,109 @@ LECTURER & QUESTION MODULE.SVG Generator > STORAGE & INFRASTRUCTURE.Cloud Media 
 
 ---
 
-## 2. Examination Lifecycle Workflow (Student & Invigilator Sub-Systems)
+## 2. Multi-Server Deployment & Traffic Control Topology
+*Shows the 1 Frontend Server, 3 Dedicated Backend Servers, PostgreSQL, Redis, and Cloudflare Storage.*
+
+```eraser
+// 4-Server Physical Deployment & Traffic Control Topology
+direction right
+
+INCOMING TRAFFIC [icon: users, color: blue] {
+  Candidates [icon: user, label: "Candidate Browsers\n(Campus Hall & Remote)"]
+  Lecturers [icon: graduation-cap, label: "Lecturer Workstations\n(Question Authoring)"]
+  Invigilators [icon: shield, label: "Proctor Consoles\n(Live Video Grid)"]
+}
+
+EDGE & TRAFFIC CONTROL [icon: cloud, color: amber] {
+  Cloudflare Edge [icon: globe, label: "Cloudflare Edge\n(DDoS Shield, SSL & WAF)"]
+  Reverse Proxy [icon: shuffle, label: "Reverse Proxy / Router\n(Traffic Controller / Nginx)"]
+}
+
+APPLICATION SERVERS [icon: server, color: purple] {
+  Frontend Host [icon: layout, label: "Server 1: Frontend Host\n(Next.js 16 • Port 3000)"]
+  Backend Api Host [icon: code, label: "Server 2: REST API Gateway\n(Express Core • Port 3001)"]
+  Backend Realtime Host [icon: radio, label: "Server 3: Realtime Engine\n(Socket.IO • Port 3002)"]
+  Backend Worker Host [icon: cpu, label: "Server 4: BullMQ Worker\n(AI Ingestion • Port 3003)"]
+}
+
+STORAGE & DATA TIER [icon: database, color: green] {
+  PostgreSQL Cluster [icon: database, label: "Primary Database\n(PostgreSQL 16 • Port 5432)"]
+  Redis Cluster [icon: layers, label: "Broker & Cache\n(Redis 7 • Port 6379)"]
+  Cloudflare R2 Storage [icon: folder, label: "Media Bucket\n(Cloudflare R2 Object Store)"]
+}
+
+// Ingress Routing
+INCOMING TRAFFIC.Candidates > EDGE & TRAFFIC CONTROL.Cloudflare Edge: HTTPS / WSS traffic
+INCOMING TRAFFIC.Lecturers > EDGE & TRAFFIC CONTROL.Cloudflare Edge: HTTPS portal requests
+INCOMING TRAFFIC.Invigilators > EDGE & TRAFFIC CONTROL.Cloudflare Edge: WSS live monitoring
+
+EDGE & TRAFFIC CONTROL.Cloudflare Edge > EDGE & TRAFFIC CONTROL.Reverse Proxy: Filtered & DDoS-shielded stream
+
+// Traffic Segmentation by Path
+EDGE & TRAFFIC CONTROL.Reverse Proxy > APPLICATION SERVERS.Frontend Host: Route '/' & '/_next/*' (UI Pages)
+EDGE & TRAFFIC CONTROL.Reverse Proxy > APPLICATION SERVERS.Backend Api Host: Route '/api/v1/*' (REST Endpoints)
+EDGE & TRAFFIC CONTROL.Reverse Proxy > APPLICATION SERVERS.Backend Realtime Host: Route '/socket.io/*' (WebSockets)
+
+// Inter-Server Communications
+APPLICATION SERVERS.Backend Api Host > STORAGE & DATA TIER.PostgreSQL Cluster: Read/Write transactions (Prisma)
+APPLICATION SERVERS.Backend Api Host > STORAGE & DATA TIER.Redis Cluster: Rate limit counters & Enqueue jobs
+APPLICATION SERVERS.Backend Realtime Host > STORAGE & DATA TIER.Redis Cluster: Multi-server Pub/Sub broadcast
+STORAGE & DATA TIER.Redis Cluster > APPLICATION SERVERS.Backend Worker Host: Dequeue 'extract-questions' jobs
+APPLICATION SERVERS.Backend Worker Host > STORAGE & DATA TIER.Cloudflare R2 Storage: Upload generated SVG diagrams
+APPLICATION SERVERS.Backend Worker Host > STORAGE & DATA TIER.PostgreSQL Cluster: Bulk insert extracted questions
+```
+
+---
+
+## 3. Defense-in-Depth Security & Anti-Cheat Architecture
+*Illustrates Layer-7 Rate Limiting, RBAC, Cryptographic Tokens, and Candidate Anti-Cheat Guards.*
+
+```eraser
+// System Security & Anti-Tamper Architecture
+direction right
+
+PERIMETER SECURITY [icon: shield, color: red] {
+  WAF & DDoS [icon: cloud-rain, label: "Cloudflare WAF\n(DDoS & Bot Mitigation)"]
+  SSL Encryption [icon: lock, label: "TLS 1.3 Transport\n(HSTS & Strict Headers)"]
+  Security Headers [icon: file-text, label: "Hardened Headers\n(nosniff, SAMEORIGIN, CSP)"]
+}
+
+TRAFFIC REGULATION [icon: filter, color: orange] {
+  Global NAT Limiter [icon: activity, label: "Global L7 Limiter\n(3000 req/60s per Hall IP)"]
+  Auth Brute Force Guard [icon: user-x, label: "Auth Guardian\n(25 tries/15m • 423 Lockout)"]
+  Exam Activity Limiter [icon: user-check, label: "Candidate Limiter\n(180 req/60s per User UUID)"]
+  Code Entry Guardian [icon: key, label: "Access Code Guardian\n(5 failed tries/5m Lock)"]
+}
+
+IDENTITY & AUTH CORE [icon: check-circle, color: purple] {
+  JWT Token Engine [icon: award, label: "8-Hour Access Tokens\n(Sliding Session Lifecycle)"]
+  Timing Safe Tokens [icon: refresh-cw, label: "Refresh Tokens\n(Constant-Time safeEqual)"]
+  Role Enforcer [icon: slash, label: "RBAC Scope Guard\n(401 Unauth / 403 Forbidden)"]
+}
+
+EXAM ROOM INTEGRITY [icon: eye, color: blue] {
+  Course Enrollment Guard [icon: book, label: "Curriculum Guard\n(Blocks Unenrolled Students)"]
+  Synchronized Window [icon: clock, label: "Schedule Guard\n(Strict Start & Close Cutoffs)"]
+  Active Telemetry [icon: camera, label: "Anti-Cheat Telemetry\n(Webcam, Tab Switch, Focus)"]
+  Malpractice Result Hold [icon: alert-triangle, label: "Single-Reviewer Sanction\n(Instant MALPRACTICE_HELD)"]
+}
+
+// Security Enforcement Flow
+PERIMETER SECURITY.WAF & DDoS > PERIMETER SECURITY.SSL Encryption: Secure incoming connection
+PERIMETER SECURITY.SSL Encryption > PERIMETER SECURITY.Security Headers: Inject security headers
+PERIMETER SECURITY.Security Headers > TRAFFIC REGULATION.Global NAT Limiter: Check campus network rate limit
+TRAFFIC REGULATION.Global NAT Limiter > TRAFFIC REGULATION.Auth Brute Force Guard: Guard login attempts
+TRAFFIC REGULATION.Auth Brute Force Guard > IDENTITY & AUTH CORE.Role Enforcer: Validate user permissions
+
+IDENTITY & AUTH CORE.Role Enforcer > EXAM ROOM INTEGRITY.Course Enrollment Guard: Check course registration
+EXAM ROOM INTEGRITY.Course Enrollment Guard > EXAM ROOM INTEGRITY.Synchronized Window: Verify active exam window
+EXAM ROOM INTEGRITY.Synchronized Window > EXAM ROOM INTEGRITY.Active Telemetry: Monitor camera frames & events
+EXAM ROOM INTEGRITY.Active Telemetry > EXAM ROOM INTEGRITY.Malpractice Result Hold: Sanction confirmed violators
+```
+
+---
+
+## 4. Student Examination Workflow (From Login to Live Video & Submission)
 
 ```eraser
 // Student CBT Examination Journey
@@ -158,7 +260,7 @@ CORE ENFORCEMENT.Grading Guard > INVIGILATION & OUTCOMES.Official Transcript: Pu
 
 ---
 
-## 3. Asynchronous AI Question Ingestion & SVG Generation Pipeline
+## 5. Asynchronous AI Question Ingestion & High-Res SVG Pipeline
 
 ```eraser
 // AI Question Ingestion & High-Res SVG Pipeline
@@ -197,7 +299,7 @@ LECTURER INPUT.Review Step > LECTURER INPUT.Approval Step: Lock approved questio
 
 ---
 
-## 4. Live Proctoring & Single-Reviewer Malpractice Resolution Flow
+## 6. Live Proctoring & Single-Reviewer Malpractice Resolution Flow
 
 ```eraser
 // Live Proctoring & Single-Reviewer Malpractice Resolution
