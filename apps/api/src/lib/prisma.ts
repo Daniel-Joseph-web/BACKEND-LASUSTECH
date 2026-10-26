@@ -5,8 +5,8 @@ function getOptimizedDatabaseUrl(): string | undefined {
   if (!url) return undefined;
   if (url.includes('connection_limit=')) return url;
   const separator = url.includes('?') ? '&' : '?';
-  // Connection pool size 50 with 30s timeout accommodates 600 concurrent exam candidates
-  return `${url}${separator}connection_limit=50&pool_timeout=30`;
+  // Connection pool size 15 with 20s timeout ensures stable operation under max_connections=100
+  return `${url}${separator}connection_limit=15&pool_timeout=20`;
 }
 
 export const prisma = new PrismaClient({
