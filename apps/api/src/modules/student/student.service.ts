@@ -675,6 +675,7 @@ export async function startSittingAttempt(
           questions: {
             orderBy: { position: 'asc' },
             include: {
+              section: true,
               questionVersion: {
                 include: {
                   stemMedia: true,
@@ -902,9 +903,33 @@ export async function startSittingAttempt(
       },
     });
 
-    const questionsToAssign = examSettings.shuffleQuestions
-      ? shuffle(candidateQuestions)
-      : candidateQuestions;
+    // Section-based question assignment & shuffling
+    // Each section preserves its sequential boundary (Section 1 -> Section 2 -> etc.)
+    // Questions are shuffled strictly WITHIN each section if shuffleQuestions is enabled.
+    const sectionGroups = new Map<string, PaperQuestionItem[]>();
+    for (const q of candidateQuestions) {
+      if (!sectionGroups.has(q.sectionId)) {
+        sectionGroups.set(q.sectionId, []);
+      }
+      sectionGroups.get(q.sectionId)!.push(q);
+    }
+
+    const questionsToAssign: PaperQuestionItem[] = [];
+    for (const section of sitting.exam.sections) {
+      const secQuestions = sectionGroups.get(section.id) || [];
+      if (secQuestions.length > 0) {
+        questionsToAssign.push(
+          ...(examSettings.shuffleQuestions ? shuffle([...secQuestions]) : secQuestions)
+        );
+      }
+    }
+    for (const [secId, secQuestions] of sectionGroups.entries()) {
+      if (!sitting.exam.sections.some((s: any) => s.id === secId)) {
+        questionsToAssign.push(
+          ...(examSettings.shuffleQuestions ? shuffle([...secQuestions]) : secQuestions)
+        );
+      }
+    }
 
     if (questionsToAssign.length > 0) {
       await tx.attemptQuestion.createMany({
@@ -927,6 +952,7 @@ export async function startSittingAttempt(
         questions: {
           orderBy: { position: 'asc' },
           include: {
+            section: true,
             questionVersion: {
               include: {
                 stemMedia: true,
@@ -1000,6 +1026,8 @@ async function formatAttemptPaper(attempt: any, defaultDurationMin: number) {
       position: q.position,
       questionVersionId: version.id,
       sectionId: q.sectionId,
+      sectionTitle: q.section?.title || null,
+      sectionPosition: q.section?.position ?? null,
       text: extractText(version.stem),
       marks: Number(q.weightedMarks),
       hasMath: Boolean(version.hasMath),
@@ -1011,6 +1039,24 @@ async function formatAttemptPaper(attempt: any, defaultDurationMin: number) {
       isFlagged: saved?.flagged || false,
     };
   });
+
+  const rawSections = attempt.sitting?.exam?.sections || [];
+  const questionsPerSection = new Map<string, number>();
+  for (const q of questions) {
+    if (q.sectionId) {
+      questionsPerSection.set(q.sectionId, (questionsPerSection.get(q.sectionId) || 0) + 1);
+    }
+  }
+
+  const sections = rawSections.map((sec: any) => ({
+    id: sec.id,
+    title: sec.title,
+    position: sec.position,
+    timerMode: sec.timerMode,
+    minutes: sec.minutes,
+    weight: Number(sec.weight || 1),
+    questionCount: questionsPerSection.get(sec.id) ?? (sec._count?.questions ?? 0),
+  }));
 
   let studentInfo = attempt.student;
   if (!studentInfo && attempt.studentId) {
@@ -1039,6 +1085,7 @@ async function formatAttemptPaper(attempt: any, defaultDurationMin: number) {
     instructions: attempt.sitting?.exam?.instructions || null,
     remainingSec,
     totalQuestions: questions.length,
+    sections,
     questions,
   };
 }
@@ -1052,6 +1099,9 @@ export async function getAttemptPaper(userId: string, attemptId: string) {
           exam: {
             include: {
               course: true,
+              sections: {
+                orderBy: { position: 'asc' },
+              },
             },
           },
         },
@@ -1059,6 +1109,7 @@ export async function getAttemptPaper(userId: string, attemptId: string) {
       questions: {
         orderBy: { position: 'asc' },
         include: {
+          section: true,
           questionVersion: {
             include: {
               stemMedia: true,

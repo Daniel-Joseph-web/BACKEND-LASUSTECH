@@ -103,6 +103,7 @@ const attemptInclude = {
   questions: {
     orderBy: { position: 'asc' as const },
     include: {
+      section: true,
       questionVersion: {
         include: {
           question: { select: { answerFormat: true } },
@@ -128,6 +129,8 @@ const presentPaper = (attempt: AttemptWithPaper) => {
       questionVersionId: version.id,
       position: question.position,
       sectionId: question.sectionId,
+      sectionTitle: question.section?.title ?? null,
+      sectionPosition: question.section?.position ?? null,
       marks: Number(question.weightedMarks),
       answerFormat: version.question.answerFormat,
       stem: version.stem,
@@ -164,6 +167,25 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
   // `showResults` hides the score from the candidate; the attempt token would
   // otherwise let them read it straight from this response.
   const reveal = boolSetting(settings, 'showResults', true);
+
+  const rawSections = attempt.sitting.exam.sections || [];
+  const questionsPerSection = new Map<string, number>();
+  for (const q of attempt.questions) {
+    if (q.sectionId) {
+      questionsPerSection.set(q.sectionId, (questionsPerSection.get(q.sectionId) || 0) + 1);
+    }
+  }
+
+  const sections = rawSections.map((sec) => ({
+    id: sec.id,
+    title: sec.title,
+    position: sec.position,
+    timerMode: sec.timerMode,
+    minutes: sec.minutes,
+    weight: Number(sec.weight),
+    questionCount: questionsPerSection.get(sec.id) ?? (sec._count?.questions ?? 0),
+  }));
+
   return {
     attemptId: attempt.id,
     sittingId: attempt.sittingId,
@@ -177,6 +199,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     exam: examMeta(attempt.sitting.exam),
     requireWebcam: attempt.sitting.requireWebcam ?? false,
     antiCheatEnabled: boolSetting(settings, 'antiCheatEnabled', true),
+    sections,
     questions: presentPaper(attempt),
     result:
       current && reveal
