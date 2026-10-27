@@ -70,7 +70,7 @@ export const getExamResults = async (req: Request, res: Response) => {
   let passCount = 0;
 
   const students = rows.map((r) => {
-    const percent = Number(r.percent);
+    const percent = Math.max(0, Math.min(100, Number(r.percent) || 0));
     sum += percent;
     if (percent >= passMark) passCount++;
 
@@ -87,8 +87,8 @@ export const getExamResults = async (req: Request, res: Response) => {
     return {
       id: r.id,
       attemptId: r.attemptId,
-      matric: r.attempt.student.matricNo || 'Unknown',
-      name: r.attempt.student.names,
+      matric: r.attempt.student?.matricNo || 'Unknown',
+      name: r.attempt.student?.names || 'Candidate',
       rawScore,
       maxScore,
       score: percent,
@@ -126,8 +126,8 @@ export const exportExamResultsCsv = async (req: Request, res: Response) => {
   });
 
   const rows = rawResults.map((r) => [
-    r.attempt.student.matricNo || 'Unknown',
-    r.attempt.student.names,
+    r.attempt.student?.matricNo || 'Unknown',
+    r.attempt.student?.names || 'Candidate',
     Number(r.rawScore).toString(),
     Number(r.maxScore).toString(),
     Number(r.percent).toFixed(1) + '%',
