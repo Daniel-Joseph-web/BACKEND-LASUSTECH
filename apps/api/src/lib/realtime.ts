@@ -9,7 +9,8 @@ export interface RealtimeEventPayload {
     roles?: string[];
     rooms?: string[];
   };
-  data: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  payload?: Record<string, unknown>;
 }
 
 /**
@@ -18,7 +19,12 @@ export interface RealtimeEventPayload {
  */
 export async function publishRealtimeEvent(payload: RealtimeEventPayload): Promise<void> {
   try {
-    await redisConnection.publish(CBT_REALTIME_CHANNEL, JSON.stringify(payload));
+    const data = payload.data || payload.payload || {};
+    const message = {
+      ...payload,
+      data,
+    };
+    await redisConnection.publish(CBT_REALTIME_CHANNEL, JSON.stringify(message));
   } catch (err: any) {
     console.warn(`[Realtime PubSub] Warning: Could not publish event ${payload.event}: ${err.message}`);
   }

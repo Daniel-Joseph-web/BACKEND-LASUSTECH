@@ -204,8 +204,10 @@ export function setupRealtimeServer(
 
   redisSub.on('message', (_channel, rawMessage) => {
     try {
-      const msg: RealtimeMessage = JSON.parse(rawMessage);
-      const { event, target, data } = msg;
+      const msg: any = JSON.parse(rawMessage);
+      const event = msg.event;
+      const target = msg.target;
+      const data = msg.data || msg.payload || {};
 
       if (!event) return;
 

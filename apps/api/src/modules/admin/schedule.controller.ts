@@ -20,6 +20,7 @@ const sittingInclude = {
       kind: true,
       status: true,
       audience: true,
+      publicSlug: true,
       course: { select: { id: true, code: true, title: true, level: true } },
       subject: { select: { id: true, name: true, level: true, institution: true } },
       session: { select: { id: true, name: true } },
@@ -46,6 +47,9 @@ const present = (s: SittingRow) => ({
   examKind: s.exam.kind,
   examStatus: s.exam.status,
   audience: s.exam.audience,
+  examSlug: s.exam.publicSlug ?? null,
+  publicLink: s.exam.audience === 'PUBLIC' && s.exam.publicSlug ? `/exam/${s.exam.publicSlug}` : null,
+  isPublic: s.exam.audience === 'PUBLIC',
   courseId: s.exam.course?.id ?? null,
   courseCode: s.exam.course?.code ?? null,
   courseTitle: s.exam.course?.title ?? null,
@@ -297,6 +301,7 @@ export const createSitting = async (req: Request, res: Response) => {
         sessionId: true,
         createdBy: true,
         title: true,
+        publicSlug: true,
         durationMin: true,
         course: { select: { code: true, title: true } },
       },
@@ -455,7 +460,8 @@ export const createSitting = async (req: Request, res: Response) => {
       },
     );
 
-    // Also notify assigned lecturers and invigilators
+    // Also notify assigned lecturers, invigilators, and scheduling admin
+    const examUrl = exam.audience === 'PUBLIC' && exam.publicSlug ? `/exam/${exam.publicSlug}` : `/student/exam/${sitting.id}/start?code=${accessCode}`;
     const lecturerRecipients = [...new Set([exam.createdBy, ...body.invigilatorIds].filter(Boolean))] as string[];
     if (lecturerRecipients.length > 0) {
       await notifyUsers(
@@ -464,8 +470,21 @@ export const createSitting = async (req: Request, res: Response) => {
         {
           type: 'EXAM_REMINDER',
           title: `Sitting Scheduled: ${courseLabel}`,
-          body: `An exam sitting for "${exam.title}" has been scheduled for ${lagosDateTime(startsAt)}.`,
-          meta: { kind: 'SITTING_SCHEDULED', sittingId: sitting.id, href: '/lecturer/exams' },
+          body: `An exam sitting for "${exam.title}" has been scheduled for ${lagosDateTime(startsAt)}. Access Code: ${accessCode}. Exam Link: ${examUrl}`,
+          meta: { kind: 'SITTING_SCHEDULED', sittingId: sitting.id, accessCode, examUrl, href: `/lecturer/exams/${exam.id}/preview` },
+        },
+      );
+    }
+
+    if (actor.actorId && !lecturerRecipients.includes(actor.actorId)) {
+      await notifyUsers(
+        tx,
+        [actor.actorId],
+        {
+          type: 'EXAM_REMINDER',
+          title: `Sitting Scheduled: ${courseLabel}`,
+          body: `Exam sitting for "${exam.title}" scheduled for ${lagosDateTime(startsAt)}. Access Code: ${accessCode}. Exam Link: ${examUrl}`,
+          meta: { kind: 'SITTING_SCHEDULED', sittingId: sitting.id, accessCode, examUrl, href: `/admin/schedule` },
         },
       );
     }
@@ -632,8 +651,19 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
   const sitting = await prisma.sitting.findUnique({
     where: { id },
     include: {
-      exam: { select: { title: true, course: { select: { code: true } }, subject: { select: { name: true } } } },
+      exam: {
+        select: {
+          id: true,
+          title: true,
+          createdBy: true,
+          audience: true,
+          publicSlug: true,
+          course: { select: { code: true } },
+          subject: { select: { name: true } },
+        },
+      },
       students: { select: { studentId: true } },
+      invigilators: { select: { userId: true } },
     },
   });
   if (!sitting) throw Errors.notFound('Sitting');
@@ -644,6 +674,13 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
   const accessCode = generateAccessCode();
   const accessCodeHash = await hashAccessCode(accessCode);
   const courseLabel = sitting.exam.course ? sitting.exam.course.code : (sitting.exam.subject?.name ?? sitting.exam.title);
+  const examUrl = sitting.exam.audience === 'PUBLIC' && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${id}/start?code=${accessCode}`;
+  const allRecipients = [...new Set([
+    ...sitting.students.map((s) => s.studentId),
+    sitting.exam.createdBy,
+    ...sitting.invigilators.map((i) => i.userId),
+    actor.actorId,
+  ].filter(Boolean))] as string[];
 
   await prisma.$transaction(async (tx) => {
     await tx.sitting.update({ where: { id }, data: { accessCodeHash } });
@@ -655,12 +692,12 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
     });
     await notifyUsers(
       tx,
-      sitting.students.map((s) => s.studentId),
+      allRecipients,
       {
         type: 'EXAM_REMINDER',
         title: `Updated Exam Access Code: ${courseLabel}`,
-        body: `The exam access code for ${courseLabel} is: ${accessCode}. Use this code to unlock and start your examination.`,
-        meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, href: `/student/exam/${id}/start?code=${accessCode}` },
+        body: `The exam access code for ${courseLabel} is: ${accessCode}. Exam Link: ${examUrl}. Use this code to unlock and start your examination.`,
+        meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, examUrl, href: `/student/exam/${id}/start?code=${accessCode}` },
       },
     );
 
@@ -1016,19 +1053,57 @@ export const getSittingAttendance = async (req: Request, res: Response) => {
 
   const presentCount = attendees.filter((a) => a.isPresent).length;
   const absentCount = attendees.length - presentCount;
+  const inProgressCount = attendees.filter((a) => a.attemptStatus === 'IN_PROGRESS').length;
+  const completedCount = attendees.filter((a) => (a.attemptStatus as string) === 'SUBMITTED' || (a.attemptStatus as string) === 'AUTO_SUBMITTED' || (a.attemptStatus as string) === 'COMPLETED').length;
+
+  const sittingMeta = {
+    id: sitting.id,
+    sittingId: sitting.id,
+    startsAt: sitting.startsAt.toISOString(),
+    endsAt: sitting.endsAt.toISOString(),
+    status: sitting.status,
+    venue: sitting.venue ?? sitting.venueRef?.name ?? 'CBT Centre',
+    courseCode: sitting.exam.course?.code ?? sitting.exam.subject?.name ?? 'EXAM',
+    courseTitle: sitting.exam.course?.title ?? sitting.exam.title,
+    session: sitting.exam.session?.name ?? 'Current Session',
+    sessionName: sitting.exam.session?.name ?? 'Current Session',
+    lecturer: 'Departmental Faculty',
+    invigilators: sitting.invigilators.map((i) => i.user.names),
+  };
+
+  const summary = {
+    totalRegistered: attendees.length,
+    presentCount,
+    absentCount,
+    inProgressCount,
+    completedCount,
+  };
+
+  const candidates = attendees.map((a) => ({
+    sn: a.sn,
+    studentId: a.studentId,
+    matricNo: a.matricNo,
+    names: a.names,
+    department: a.department,
+    seatNumber: a.seatLabel,
+    status: (a.isPresent ? 'PRESENT' : 'ABSENT') as 'PRESENT' | 'ABSENT',
+    startedAt: a.startedAt,
+    submittedAt: a.submittedAt,
+    ipAddress: a.ipAddress,
+  }));
 
   res.json({
     data: {
       sittingId: sitting.id,
       examTitle: sitting.exam.title,
-      courseCode: sitting.exam.course?.code ?? sitting.exam.subject?.name ?? 'EXAM',
-      courseTitle: sitting.exam.course?.title ?? sitting.exam.title,
+      courseCode: sittingMeta.courseCode,
+      courseTitle: sittingMeta.courseTitle,
       level: sitting.exam.course?.level ?? null,
-      sessionName: sitting.exam.session?.name ?? 'Current Session',
-      startsAt: sitting.startsAt.toISOString(),
-      endsAt: sitting.endsAt.toISOString(),
+      sessionName: sittingMeta.sessionName,
+      startsAt: sittingMeta.startsAt,
+      endsAt: sittingMeta.endsAt,
       durationMin: sitting.durationMin,
-      venue: sitting.venue ?? sitting.venueRef?.name ?? 'CBT Centre',
+      venue: sittingMeta.venue,
       venueCapacity: sitting.venueRef?.capacity ?? null,
       deliveryMode: sitting.deliveryMode,
       requireWebcam: sitting.requireWebcam,
@@ -1041,6 +1116,10 @@ export const getSittingAttendance = async (req: Request, res: Response) => {
         staffId: i.user.staffId ?? '—',
       })),
       attendees,
+      // Nested aliases for UI components:
+      sitting: sittingMeta,
+      summary,
+      candidates,
     },
   });
 };

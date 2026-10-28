@@ -151,8 +151,7 @@ const examDetailInclude = {
     },
   },
   sittings: {
-    where: { isPublic: false },
-    select: { id: true, startsAt: true, endsAt: true, status: true },
+    select: { id: true, startsAt: true, endsAt: true, status: true, venue: true, requireWebcam: true },
     orderBy: { startsAt: 'asc' as const },
   },
 } satisfies Prisma.ExamInclude;
