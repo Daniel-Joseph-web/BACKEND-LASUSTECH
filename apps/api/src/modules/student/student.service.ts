@@ -399,20 +399,26 @@ export async function getStudentDashboard(userId: string) {
       take: 15,
     });
 
-    const codeNotif = notifications.find(
-      (n) => n.meta && typeof n.meta === 'object' && (n.meta as any).sittingId === s.id && (n.meta as any).accessCode
-    );
-    let accessCode = codeNotif ? (codeNotif.meta as any).accessCode : null;
-    if (!accessCode && s.accessCodeHash) {
-      const anyNotif = await prisma.notification.findFirst({
-        where: {
-          type: 'EXAM_REMINDER',
-          meta: { path: ['sittingId'], equals: s.id },
-        },
-        select: { meta: true },
-      });
-      if (anyNotif?.meta && typeof anyNotif.meta === 'object' && (anyNotif.meta as any).accessCode) {
-        accessCode = (anyNotif.meta as any).accessCode;
+    const isPublicExam = s.isPublic || exam.audience === 'PUBLIC';
+    let accessCode: string | null = null;
+
+    if (!isPublicExam) {
+      const codeNotif = notifications.find(
+        (n) => n.meta && typeof n.meta === 'object' && (n.meta as any).sittingId === s.id && (n.meta as any).accessCode
+      );
+      accessCode = codeNotif ? (codeNotif.meta as any).accessCode : null;
+      if (!accessCode && s.accessCodeHash) {
+        const userNotif = await prisma.notification.findFirst({
+          where: {
+            userId,
+            type: 'EXAM_REMINDER',
+            meta: { path: ['sittingId'], equals: s.id },
+          },
+          select: { meta: true },
+        });
+        if (userNotif?.meta && typeof userNotif.meta === 'object' && (userNotif.meta as any).accessCode) {
+          accessCode = (userNotif.meta as any).accessCode;
+        }
       }
     }
 

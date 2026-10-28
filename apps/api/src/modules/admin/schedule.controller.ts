@@ -449,19 +449,37 @@ export const createSitting = async (req: Request, res: Response) => {
       },
     });
 
-    await notifyUsers(
-      tx,
-      candidates.map((c) => c.studentId),
-      {
-        type: 'EXAM_REMINDER',
-        title: `Exam Access Code & Schedule: ${courseLabel}`,
-        body: `${courseLabel} takes place ${lagosDateTime(startsAt)}. Your Exam Unlock Access Code is: ${accessCode}. Use this code to unlock your examination.`,
-        meta: { kind: 'SCHEDULED', sittingId: sitting.id, accessCode, href: `/student/exam/${sitting.id}/start?code=${accessCode}` },
-      },
-    );
+    const isPublic = exam.audience === 'PUBLIC';
 
-    // Also notify assigned lecturers, invigilators, and scheduling admin
-    const examUrl = exam.audience === 'PUBLIC' && exam.publicSlug ? `/exam/${exam.publicSlug}` : `/student/exam/${sitting.id}/start?code=${accessCode}`;
+    if (!isPublic && candidates.length > 0) {
+      // Internal exam: access code IS sent to the candidate students
+      await notifyUsers(
+        tx,
+        candidates.map((c) => c.studentId),
+        {
+          type: 'EXAM_REMINDER',
+          title: `Exam Access Code & Schedule: ${courseLabel}`,
+          body: `${courseLabel} takes place ${lagosDateTime(startsAt)}. Your Exam Unlock Access Code is: ${accessCode}. Use this code to unlock your examination.`,
+          meta: { kind: 'SCHEDULED', sittingId: sitting.id, accessCode, href: `/student/exam/${sitting.id}/start?code=${accessCode}` },
+        },
+      );
+    } else if (isPublic && candidates.length > 0) {
+      // Public exam: access code MUST NOT be sent to students; they only receive general schedule info and public link
+      const publicLink = exam.publicSlug ? `/exam/${exam.publicSlug}` : `/`;
+      await notifyUsers(
+        tx,
+        candidates.map((c) => c.studentId),
+        {
+          type: 'EXAM_REMINDER',
+          title: `Exam Scheduled: ${courseLabel}`,
+          body: `Public examination for "${exam.title}" takes place ${lagosDateTime(startsAt)}. Exam Link: ${publicLink}`,
+          meta: { kind: 'SCHEDULED', sittingId: sitting.id, href: publicLink },
+        },
+      );
+    }
+
+    // Access code is sent to Admin and Lecturer ONLY (for public exams, and also for internal exams)
+    const examUrl = isPublic && exam.publicSlug ? `/exam/${exam.publicSlug}` : `/student/exam/${sitting.id}/start?code=${accessCode}`;
     const lecturerRecipients = [...new Set([exam.createdBy, ...body.invigilatorIds].filter(Boolean))] as string[];
     if (lecturerRecipients.length > 0) {
       await notifyUsers(
@@ -671,12 +689,14 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
     throw Errors.conflict('SITTING_FINISHED', 'This sitting can no longer be edited.');
   }
 
+  const isPublic = sitting.exam.audience === 'PUBLIC';
   const accessCode = generateAccessCode();
   const accessCodeHash = await hashAccessCode(accessCode);
   const courseLabel = sitting.exam.course ? sitting.exam.course.code : (sitting.exam.subject?.name ?? sitting.exam.title);
-  const examUrl = sitting.exam.audience === 'PUBLIC' && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${id}/start?code=${accessCode}`;
-  const allRecipients = [...new Set([
-    ...sitting.students.map((s) => s.studentId),
+  const examUrl = isPublic && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${id}/start?code=${accessCode}`;
+
+  // Staff recipients (Admin, assigned Lecturer, Invigilators): access code is sent to them
+  const staffRecipients = [...new Set([
     sitting.exam.createdBy,
     ...sitting.invigilators.map((i) => i.userId),
     actor.actorId,
@@ -690,16 +710,35 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
       targetId: id,
       after: { regenerated: true },
     });
-    await notifyUsers(
-      tx,
-      allRecipients,
-      {
-        type: 'EXAM_REMINDER',
-        title: `Updated Exam Access Code: ${courseLabel}`,
-        body: `The exam access code for ${courseLabel} is: ${accessCode}. Exam Link: ${examUrl}. Use this code to unlock and start your examination.`,
-        meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, examUrl, href: `/student/exam/${id}/start?code=${accessCode}` },
-      },
-    );
+
+    // Notify staff (Admin and Lecturer) with the access code
+    if (staffRecipients.length > 0) {
+      await notifyUsers(
+        tx,
+        staffRecipients,
+        {
+          type: 'EXAM_REMINDER',
+          title: `Updated Exam Access Code: ${courseLabel}`,
+          body: `The exam access code for ${courseLabel} is: ${accessCode}. Exam Link: ${examUrl}.`,
+          meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, examUrl, href: `/lecturer/exams/${sitting.exam.id}/preview` },
+        },
+      );
+    }
+
+    // For INTERNAL exams ONLY: access code is sent to students.
+    // For PUBLIC exams: the access code is NEVER sent to students!
+    if (!isPublic && sitting.students.length > 0) {
+      await notifyUsers(
+        tx,
+        sitting.students.map((s) => s.studentId),
+        {
+          type: 'EXAM_REMINDER',
+          title: `Updated Exam Access Code: ${courseLabel}`,
+          body: `The exam access code for ${courseLabel} has been updated to: ${accessCode}. Use this code to unlock and start your examination.`,
+          meta: { kind: 'ACCESS_CODE', sittingId: id, accessCode, href: `/student/exam/${id}/start?code=${accessCode}` },
+        },
+      );
+    }
 
     void publishRealtimeEvent({
       event: 'sitting.access_code_updated',
