@@ -73,10 +73,10 @@ const examMeta = (exam: ExamMeta) => {
     durationMin: exam.durationMin,
     passMark: exam.passMark != null ? Number(exam.passMark) : null,
     questionCount: questionCount(exam),
-    requiresCode: Boolean(exam.publicAccessCodeHash),
+    requiresCode: true,
     opensAt: exam.publicOpensAt,
     closesAt: exam.publicClosesAt,
-    showResults: boolSetting(settings, 'showResults', true),
+    showResults: true,
     allowRetake: boolSetting(settings, 'allowRetake', false),
     state: windowState(exam),
   };
@@ -371,13 +371,19 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
     throw Errors.conflict('EXAM_CLOSED', 'This exam has closed.', { closesAt: exam.publicClosesAt });
   }
 
+  if (!body.accessCode || !body.accessCode.trim()) {
+    throw Errors.badRequest('ACCESS_CODE_REQUIRED', 'Access code is required to begin this examination.');
+  }
+
+  let codeValid = false;
   if (exam.publicAccessCodeHash) {
-    const ok = body.accessCode
-      ? await bcrypt.compare(body.accessCode, exam.publicAccessCodeHash)
-      : false;
-    if (!ok) {
-      throw Errors.badRequest('ACCESS_CODE_REQUIRED', 'This exam needs the access code from the examiner.');
-    }
+    codeValid = await bcrypt.compare(body.accessCode.trim(), exam.publicAccessCodeHash);
+  }
+  if (!codeValid && exam.sittings[0]?.accessCodeHash) {
+    codeValid = await bcrypt.compare(body.accessCode.trim(), exam.sittings[0].accessCodeHash);
+  }
+  if (!codeValid) {
+    throw Errors.badRequest('INVALID_ACCESS_CODE', 'Invalid access code. Please obtain the correct code from the examiner or administrator.');
   }
 
   const email = body.email?.toLowerCase();
@@ -587,6 +593,7 @@ export const submitPublicAttempt = async (req: Request, res: Response) => {
     const reveal = boolSetting(settingsOf(attempt.sitting.exam), 'showResults', true);
     return res.json({
       data: {
+        attemptId: attempt.id,
         submitted: true,
         alreadySubmitted: true,
         ...(current && reveal
@@ -612,6 +619,7 @@ export const submitPublicAttempt = async (req: Request, res: Response) => {
   const fresh = await loadAttempt(attempt.id);
   res.json({
     data: {
+      attemptId: attempt.id,
       submitted: true,
       autoSubmitted: timedOut,
       ...visibleScore(fresh, summary),
@@ -619,12 +627,51 @@ export const submitPublicAttempt = async (req: Request, res: Response) => {
   });
 };
 
-/** Respects `showResults`; the score still exists in the database either way. */
+export const getPublicAttemptResult = async (req: Request, res: Response) => {
+  const id = uuidParam(req, 'id');
+  const attempt = await prisma.attempt.findUnique({
+    where: { id },
+    include: {
+      sitting: {
+        include: {
+          exam: true,
+        },
+      },
+      results: true,
+      student: {
+        select: {
+          names: true,
+          matricNo: true,
+          email: true,
+        },
+      },
+    },
+  });
+  if (!attempt) throw Errors.notFound('Attempt');
+
+  const current = attempt.results[0];
+  const candidateName = attempt.student?.names || attempt.guestEmail || 'Public Candidate';
+
+  return res.json({
+    data: {
+      attemptId: attempt.id,
+      status: attempt.status,
+      candidateName,
+      examTitle: attempt.sitting.exam.title,
+      submittedAt: attempt.submittedAt,
+      rawScore: current ? Number(current.rawScore) : null,
+      maxScore: current ? Number(current.maxScore) : null,
+      percent: current ? Number(current.percent) : null,
+      grade: current?.grade ?? null,
+      passed: current && attempt.sitting.exam.passMark != null
+        ? Number(current.percent) >= Number(attempt.sitting.exam.passMark)
+        : null,
+    },
+  });
+};
+
+/** Public exams always show their results immediately after submission. */
 function visibleScore(attempt: AttemptWithPaper, summary: Awaited<ReturnType<typeof scoreAttempt>>) {
-  const settings = settingsOf(attempt.sitting.exam);
-  if (!boolSetting(settings, 'showResults', true)) {
-    return { showResults: false as const, grade: null, percent: null, rawScore: null, maxScore: null, passed: null };
-  }
   return {
     showResults: true as const,
     rawScore: summary.rawScore,

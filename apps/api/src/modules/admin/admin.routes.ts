@@ -26,7 +26,7 @@ import {
 import { broadsheet, exportIncidentEvents, incidentEvents, performance } from './reports.controller';
 import {
   admitStudentToSitting,
-  cancelSitting, closeSitting, createSitting, deleteSitting, getSittingAttendance, listInvigilators, listSchedulableExams,
+  cancelSitting, closeSitting, createSitting, deleteSitting, getSittingAccessCode, getSittingAttendance, listInvigilators, listSchedulableExams,
   listSchedule, listVenues, openSitting, regenerateAccessCode, updateSitting,
 } from './schedule.controller';
 import {
@@ -106,6 +106,7 @@ adminRouter.post('/schedule/:id/open', openSitting);
 adminRouter.post('/schedule/:id/close', closeSitting);
 adminRouter.post('/schedule/:id/cancel', cancelSitting);
 adminRouter.post('/schedule/:id/access-code', regenerateAccessCode);
+adminRouter.get('/schedule/:id/access-code', getSittingAccessCode);
 adminRouter.post('/schedule/:id/students', admitStudentToSitting);
 adminRouter.get('/schedule/:id/attendance', getSittingAttendance);
 

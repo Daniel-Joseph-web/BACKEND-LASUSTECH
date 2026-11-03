@@ -77,7 +77,7 @@ const createExamSchema = z
     levelLabel: z.string().trim().max(80).optional(),
     examBoard: z.string().trim().max(120).optional(),
     instructions: z.record(z.string(), z.unknown()).optional(),
-    durationMin: z.number().int().min(1).max(600).optional(),
+    durationMin: z.number().int().min(1).max(600),
     passMark: z.coerce.number().min(0).max(100).optional(),
     // prefault, not default: Zod 4 types `.default()` against the *output*
     // type, where every settings key is required. `prefault` parses the given
@@ -110,10 +110,10 @@ const createExamSchema = z
         path: ['audience'],
       });
     }
-    if (data.audience === 'PUBLIC' && !data.durationMin) {
+    if (!data.durationMin) {
       ctx.addIssue({
         code: 'custom',
-        message: 'A public exam needs a duration.',
+        message: 'The examination requires a general duration in minutes.',
         path: ['durationMin'],
       });
     }
@@ -304,8 +304,8 @@ export const createExam = async (req: Request, res: Response) => {
         examBoard: body.examBoard,
         instructions: (body.instructions ?? {}) as Prisma.InputJsonValue,
         settings,
-        status: 'APPROVED',
-        publishedAt: now,
+        status: 'DRAFT',
+        publishedAt: null,
         durationMin: body.durationMin,
         passMark: body.passMark !== undefined ? new Prisma.Decimal(body.passMark) : null,
         publicSlug: slug,
@@ -317,39 +317,8 @@ export const createExam = async (req: Request, res: Response) => {
 
     await materializePaper(tx, created.id, scope, body.sections as PaperSectionInput[]);
 
-    if (body.audience === 'PUBLIC') {
-      const startsAt = body.publicOpensAt ? new Date(body.publicOpensAt) : now;
-      const endsAt = body.publicClosesAt
-        ? new Date(body.publicClosesAt)
-        : new Date(now.getTime() + 10 * 365 * 24 * 60 * 60 * 1000);
-      await tx.sitting.create({
-        data: {
-          examId: created.id,
-          startsAt,
-          endsAt,
-          durationMin: body.durationMin ?? 60,
-          timerMode: 'PER_STUDENT_START',
-          lateGraceMin: 0,
-          lateCutoffMin: 0,
-          clockPolicy: 'RUNNING',
-          maxPauseMin: 0,
-          reconnectGraceSec: 60,
-          venue: null,
-          venueId: null,
-          isPublic: true,
-          deliveryMode: 'REMOTE',
-          requireWebcam: false,
-          requireSeb: false,
-          // The candidate code lives on Exam.publicAccessCodeHash; this column is
-          // NOT NULL, so store a random value that can never match.
-          accessCodeHash: await bcrypt.hash(crypto.randomBytes(24).toString('hex'), 10),
-          status: 'OPEN',
-        },
-      });
-    }
-
     await writeAudit(tx, actor, {
-      action: 'exam.publish',
+      action: 'exam.create',
       targetType: 'Exam',
       targetId: created.id,
       after: {
@@ -357,6 +326,7 @@ export const createExam = async (req: Request, res: Response) => {
         audience: created.audience,
         sections: body.sections.length,
         publicSlug: slug,
+        status: 'DRAFT',
       },
     });
 
@@ -377,8 +347,8 @@ export const createExam = async (req: Request, res: Response) => {
       const lecturerName = (req as any).user?.names || 'A lecturer';
       await notifyUsers(tx, adminUserIds, {
         type: 'SYSTEM',
-        title: `New Exam Live: ${created.title}`,
-        body: `Lecturer ${lecturerName} published exam "${created.title}" (${courseLabel}). Questions are live and ready for sitting scheduling.`,
+        title: `New Exam Paper Ready for Scheduling: ${created.title}`,
+        body: `Lecturer ${lecturerName} prepared exam "${created.title}" (${courseLabel}). The exam paper is ready and pending Administrator scheduling.`,
         meta: {
           kind: 'EXAM_CREATED',
           examId: created.id,
@@ -537,7 +507,8 @@ export const deleteExam = async (req: Request, res: Response) => {
       sittings: {
         select: {
           id: true,
-          _count: { select: { attempts: true, batches: true, incidents: true } },
+          batches: { select: { id: true } },
+          _count: { select: { attempts: true, incidents: true } },
         },
       },
     },
@@ -545,7 +516,7 @@ export const deleteExam = async (req: Request, res: Response) => {
   if (!exam) throw Errors.notFound('Exam');
 
   const inUse = exam.sittings.some(
-    (s) => s._count.attempts || s._count.batches || s._count.incidents,
+    (s) => s._count.attempts || s.batches || s._count.incidents,
   );
   if (inUse) {
     throw Errors.conflict('EXAM_IN_USE', 'This exam has attempts or results. Archive it instead of deleting.');

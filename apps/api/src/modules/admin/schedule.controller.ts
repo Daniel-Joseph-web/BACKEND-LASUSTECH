@@ -126,7 +126,7 @@ export const listSchedulableExams = async (req: Request, res: Response) => {
   const q = z.object({ sessionId: z.uuid().optional() }).parse(req.query);
   const exams = await prisma.exam.findMany({
     where: {
-      status: { in: ['APPROVED', 'LOCKED'] },
+      status: { in: ['DRAFT', 'APPROVED', 'LOCKED'] },
       ...(q.sessionId ? { sessionId: q.sessionId } : {}),
     },
     select: {
@@ -309,10 +309,10 @@ export const createSitting = async (req: Request, res: Response) => {
     getGroup('exam'),
   ]);
   if (!exam) throw Errors.notFound('Exam');
-  if (exam.status !== 'APPROVED' && exam.status !== 'LOCKED') {
+  if (exam.status !== 'DRAFT' && exam.status !== 'APPROVED' && exam.status !== 'LOCKED') {
     throw Errors.conflict(
       'EXAM_NOT_READY',
-      'Only approved or locked exams can be scheduled.',
+      'Only exams in draft, approved or locked status can be scheduled.',
       { status: exam.status },
     );
   }
@@ -435,6 +435,24 @@ export const createSitting = async (req: Request, res: Response) => {
       },
     });
 
+    const isPublic = exam.audience === 'PUBLIC';
+
+    // Activate the exam upon admin scheduling (Requirement 3 & 5)
+    await tx.exam.update({
+      where: { id: exam.id },
+      data: {
+        status: 'APPROVED',
+        publishedAt: new Date(),
+        ...(isPublic
+          ? {
+              publicAccessCodeHash: accessCodeHash,
+              publicOpensAt: startsAt,
+              publicClosesAt: endsAt,
+            }
+          : {}),
+      },
+    });
+
     await writeAudit(tx, actor, {
       action: 'sitting.create',
       targetType: 'Sitting',
@@ -448,8 +466,6 @@ export const createSitting = async (req: Request, res: Response) => {
         invigilators: body.invigilatorIds.length,
       },
     });
-
-    const isPublic = exam.audience === 'PUBLIC';
 
     if (!isPublic && candidates.length > 0) {
       // Internal exam: access code IS sent to the candidate students
@@ -487,8 +503,10 @@ export const createSitting = async (req: Request, res: Response) => {
         lecturerRecipients,
         {
           type: 'EXAM_REMINDER',
-          title: `Sitting Scheduled: ${courseLabel}`,
-          body: `An exam sitting for "${exam.title}" has been scheduled for ${lagosDateTime(startsAt)}. Access Code: ${accessCode}. Exam Link: ${examUrl}`,
+          title: isPublic ? `Public Exam Scheduled: ${exam.title}` : `Sitting Scheduled: ${courseLabel}`,
+          body: isPublic
+            ? `Your public exam "${exam.title}" has been scheduled for ${lagosDateTime(startsAt)}. Candidate Access Code: ${accessCode}. Candidates must enter this code to begin. Exam Link: ${examUrl}`
+            : `An exam sitting for "${exam.title}" has been scheduled for ${lagosDateTime(startsAt)}. Access Code: ${accessCode}. Exam Link: ${examUrl}`,
           meta: { kind: 'SITTING_SCHEDULED', sittingId: sitting.id, accessCode, examUrl, href: `/lecturer/exams/${exam.id}/preview` },
         },
       );
@@ -500,7 +518,7 @@ export const createSitting = async (req: Request, res: Response) => {
         [actor.actorId],
         {
           type: 'EXAM_REMINDER',
-          title: `Sitting Scheduled: ${courseLabel}`,
+          title: isPublic ? `Public Exam Scheduled: ${exam.title}` : `Sitting Scheduled: ${courseLabel}`,
           body: `Exam sitting for "${exam.title}" scheduled for ${lagosDateTime(startsAt)}. Access Code: ${accessCode}. Exam Link: ${examUrl}`,
           meta: { kind: 'SITTING_SCHEDULED', sittingId: sitting.id, accessCode, examUrl, href: `/admin/schedule` },
         },
@@ -704,6 +722,9 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
 
   await prisma.$transaction(async (tx) => {
     await tx.sitting.update({ where: { id }, data: { accessCodeHash } });
+    if (isPublic) {
+      await tx.exam.update({ where: { id: sitting.exam.id }, data: { publicAccessCodeHash: accessCodeHash } });
+    }
     await writeAudit(tx, actor, {
       action: 'sitting.access_code',
       targetType: 'Sitting',
@@ -755,6 +776,32 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
     });
   });
   res.json({ data: { id, accessCode } });
+};
+
+export const getSittingAccessCode = async (req: Request, res: Response) => {
+  const id = uuidParam(req);
+  const sitting = await prisma.sitting.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      exam: { select: { title: true } },
+    },
+  });
+  if (!sitting) throw Errors.notFound('Sitting');
+
+  // Check recent notifications for this sitting to retrieve the dispatched access code
+  const notification = await prisma.notification.findFirst({
+    where: {
+      meta: {
+        path: ['sittingId'],
+        equals: id,
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  const code = (notification?.meta as any)?.accessCode ?? null;
+  res.json({ data: { id, accessCode: code } });
 };
 
 const transition = async (
@@ -875,14 +922,15 @@ export const deleteSitting = async (req: Request, res: Response) => {
           subject: { select: { name: true } },
         },
       },
-      _count: { select: { attempts: true, incidents: true, batches: true } },
+      batches: { select: { id: true } },
+      _count: { select: { attempts: true, incidents: true } },
     },
   });
   if (!sitting) throw Errors.notFound('Sitting');
   if (sitting.status === 'OPEN') {
     throw Errors.conflict('SITTING_OPEN', 'Close the sitting before deleting it.');
   }
-  if (sitting._count.attempts || sitting._count.incidents || sitting._count.batches) {
+  if (sitting._count.attempts || sitting._count.incidents || sitting.batches) {
     throw Errors.conflict(
       'IN_USE',
       'This sitting has attempts, incidents or result batches. Cancel it instead of deleting.',
