@@ -21,6 +21,7 @@ const sittingInclude = {
       status: true,
       audience: true,
       publicSlug: true,
+      settings: true,
       course: { select: { id: true, code: true, title: true, level: true } },
       subject: { select: { id: true, name: true, level: true, institution: true } },
       session: { select: { id: true, name: true } },
@@ -40,41 +41,46 @@ const examLabel = (exam: SittingRow['exam']) =>
     ? `${exam.course.code} — ${exam.course.title}`
     : (exam.subject?.name ?? exam.title);
 
-const present = (s: SittingRow) => ({
-  id: s.id,
-  examId: s.examId,
-  examTitle: s.exam.title,
-  examKind: s.exam.kind,
-  examStatus: s.exam.status,
-  audience: s.exam.audience,
-  examSlug: s.exam.publicSlug ?? null,
-  publicLink: s.exam.audience === 'PUBLIC' && s.exam.publicSlug ? `/exam/${s.exam.publicSlug}` : null,
-  isPublic: s.exam.audience === 'PUBLIC',
-  courseId: s.exam.course?.id ?? null,
-  courseCode: s.exam.course?.code ?? null,
-  courseTitle: s.exam.course?.title ?? null,
-  courseLevel: s.exam.course?.level ?? null,
-  subjectId: s.exam.subject?.id ?? null,
-  subjectName: s.exam.subject?.name ?? null,
-  ownerLabel: examLabel(s.exam),
-  sessionId: s.exam.session?.id ?? null,
-  sessionName: s.exam.session?.name ?? null,
-  startsAt: s.startsAt,
-  endsAt: s.endsAt,
-  durationMin: s.durationMin,
-  lateGraceMin: s.lateGraceMin,
-  lateCutoffMin: s.lateCutoffMin,
-  venue: s.venue,
-  venueId: s.venueId,
-  venueCapacity: s.venueRef?.capacity ?? null,
-  status: s.status,
-  deliveryMode: s.deliveryMode,
-  requireWebcam: s.requireWebcam,
-  requireSeb: s.requireSeb,
-  registered: s._count.students,
-  attempts: s._count.attempts,
-  invigilators: s.invigilators.map((i) => i.user),
-});
+const present = (s: SittingRow) => {
+  const examSettings = ((s.exam.settings ?? {}) as Record<string, any>);
+  const accessCode = (examSettings.accessCode as string | undefined) ?? null;
+  return {
+    id: s.id,
+    examId: s.examId,
+    examTitle: s.exam.title,
+    examKind: s.exam.kind,
+    examStatus: s.exam.status,
+    audience: s.exam.audience,
+    examSlug: s.exam.publicSlug ?? null,
+    publicLink: s.exam.audience === 'PUBLIC' && s.exam.publicSlug ? `/exam/${s.exam.publicSlug}` : null,
+    isPublic: s.exam.audience === 'PUBLIC',
+    accessCode,
+    courseId: s.exam.course?.id ?? null,
+    courseCode: s.exam.course?.code ?? null,
+    courseTitle: s.exam.course?.title ?? null,
+    courseLevel: s.exam.course?.level ?? null,
+    subjectId: s.exam.subject?.id ?? null,
+    subjectName: s.exam.subject?.name ?? null,
+    ownerLabel: examLabel(s.exam),
+    sessionId: s.exam.session?.id ?? null,
+    sessionName: s.exam.session?.name ?? null,
+    startsAt: s.startsAt,
+    endsAt: s.endsAt,
+    durationMin: s.durationMin,
+    lateGraceMin: s.lateGraceMin,
+    lateCutoffMin: s.lateCutoffMin,
+    venue: s.venue,
+    venueId: s.venueId,
+    venueCapacity: s.venueRef?.capacity ?? null,
+    status: s.status,
+    deliveryMode: s.deliveryMode,
+    requireWebcam: s.requireWebcam,
+    requireSeb: s.requireSeb,
+    registered: s._count.students,
+    attempts: s._count.attempts,
+    invigilators: s.invigilators.map((i) => i.user),
+  };
+};
 
 const listQuery = z.object({
   ...pageShape,
@@ -303,6 +309,7 @@ export const createSitting = async (req: Request, res: Response) => {
         title: true,
         publicSlug: true,
         durationMin: true,
+        settings: true,
         course: { select: { code: true, title: true } },
       },
     }),
@@ -436,6 +443,7 @@ export const createSitting = async (req: Request, res: Response) => {
     });
 
     const isPublic = exam.audience === 'PUBLIC';
+    const currentExamSettings = ((exam.settings ?? {}) as Record<string, any>);
 
     // Activate the exam upon admin scheduling (Requirement 3 & 5)
     await tx.exam.update({
@@ -443,8 +451,10 @@ export const createSitting = async (req: Request, res: Response) => {
       data: {
         status: 'APPROVED',
         publishedAt: new Date(),
+        settings: { ...currentExamSettings, accessCode },
         ...(isPublic
           ? {
+              publicSlug: exam.publicSlug || crypto.randomBytes(16).toString('base64url'),
               publicAccessCodeHash: accessCodeHash,
               publicOpensAt: startsAt,
               publicClosesAt: endsAt,
@@ -694,6 +704,7 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
           createdBy: true,
           audience: true,
           publicSlug: true,
+          settings: true,
           course: { select: { code: true } },
           subject: { select: { name: true } },
         },
@@ -722,9 +733,14 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
 
   await prisma.$transaction(async (tx) => {
     await tx.sitting.update({ where: { id }, data: { accessCodeHash } });
-    if (isPublic) {
-      await tx.exam.update({ where: { id: sitting.exam.id }, data: { publicAccessCodeHash: accessCodeHash } });
-    }
+    const currentExamSettings = ((sitting.exam.settings ?? {}) as Record<string, any>);
+    await tx.exam.update({
+      where: { id: sitting.exam.id },
+      data: {
+        settings: { ...currentExamSettings, accessCode },
+        ...(isPublic ? { publicAccessCodeHash: accessCodeHash } : {}),
+      },
+    });
     await writeAudit(tx, actor, {
       action: 'sitting.access_code',
       targetType: 'Sitting',
@@ -779,29 +795,82 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
 };
 
 export const getSittingAccessCode = async (req: Request, res: Response) => {
-  const id = uuidParam(req);
-  const sitting = await prisma.sitting.findUnique({
-    where: { id },
-    select: {
-      id: true,
-      exam: { select: { title: true } },
-    },
-  });
-  if (!sitting) throw Errors.notFound('Sitting');
+  const paramId = String(req.params.id ?? '').trim();
+  if (!paramId) throw Errors.badRequest('MISSING_ID', 'ID is required.');
 
-  // Check recent notifications for this sitting to retrieve the dispatched access code
-  const notification = await prisma.notification.findFirst({
+  // Find sitting by sitting ID or fallback to finding by exam ID
+  let sitting = await prisma.sitting.findFirst({
     where: {
-      meta: {
-        path: ['sittingId'],
-        equals: id,
+      OR: [
+        { id: paramId },
+        { examId: paramId },
+      ],
+    },
+    include: {
+      exam: {
+        select: {
+          id: true,
+          title: true,
+          audience: true,
+          publicSlug: true,
+          settings: true,
+        },
       },
     },
     orderBy: { createdAt: 'desc' },
   });
 
-  const code = (notification?.meta as any)?.accessCode ?? null;
-  res.json({ data: { id, accessCode: code } });
+  if (!sitting) throw Errors.notFound('Sitting or Exam');
+
+  const examSettings = ((sitting.exam.settings ?? {}) as Record<string, any>);
+  let code: string | null = (examSettings.accessCode as string | undefined) ?? null;
+
+  // If not stored in exam settings, check recent notifications
+  if (!code) {
+    try {
+      const notification = await prisma.notification.findFirst({
+        where: {
+          meta: {
+            path: ['sittingId'],
+            equals: sitting.id,
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      code = (notification?.meta as any)?.accessCode ?? null;
+    } catch {
+      // ignore json query failure
+    }
+  }
+
+  // If still missing (e.g. legacy sitting), generate fresh code and sync to DB so it never fails
+  if (!code) {
+    code = generateAccessCode();
+    const hash = await hashAccessCode(code);
+    await prisma.$transaction([
+      prisma.sitting.update({ where: { id: sitting.id }, data: { accessCodeHash: hash } }),
+      prisma.exam.update({
+        where: { id: sitting.exam.id },
+        data: {
+          settings: { ...examSettings, accessCode: code },
+          ...(sitting.isPublic || sitting.exam.audience === 'PUBLIC' ? { publicAccessCodeHash: hash } : {}),
+        },
+      }),
+    ]);
+  }
+
+  const publicLink = sitting.exam.audience === 'PUBLIC' && sitting.exam.publicSlug
+    ? `/exam/${sitting.exam.publicSlug}`
+    : null;
+
+  res.json({
+    data: {
+      id: sitting.id,
+      examId: sitting.exam.id,
+      accessCode: code,
+      publicLink,
+    },
+  });
 };
 
 const transition = async (

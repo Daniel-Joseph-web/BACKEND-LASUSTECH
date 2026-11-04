@@ -54,11 +54,16 @@ const questionCount = (exam: ExamMeta) =>
 
 const examMeta = (exam: ExamMeta) => {
   const settings = settingsOf(exam);
+  const isApproved = exam.status === 'APPROVED';
+  const state = isApproved ? windowState(exam) : ('NOT_OPEN' as const);
+
   return {
     slug: exam.publicSlug,
     title: exam.title,
     kind: exam.kind,
     kindLabel: exam.kindLabel ?? exam.kind.replaceAll('_', ' ').toLowerCase(),
+    status: exam.status,
+    isScheduled: isApproved,
     course: exam.course,
     subject: exam.subject,
     ownerLabel: exam.subject
@@ -78,13 +83,14 @@ const examMeta = (exam: ExamMeta) => {
     closesAt: exam.publicClosesAt,
     showResults: true,
     allowRetake: boolSetting(settings, 'allowRetake', false),
-    state: windowState(exam),
+    state,
   };
 };
 
 async function findPublicExam(slug: string) {
+  const cleanSlug = String(slug || '').trim();
   const exam = await prisma.exam.findFirst({
-    where: { publicSlug: slug, audience: 'PUBLIC', status: 'APPROVED' },
+    where: { publicSlug: cleanSlug, audience: 'PUBLIC' },
     include: examMetaInclude,
   });
   if (!exam) throw Errors.notFound('Exam');
@@ -182,7 +188,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     position: sec.position,
     timerMode: sec.timerMode,
     minutes: sec.minutes,
-    weight: Number(sec.weight),
+    weight: Number(sec.weight) || 1,
     questionCount: questionsPerSection.get(sec.id) ?? (sec._count?.questions ?? 0),
   }));
 
@@ -288,14 +294,17 @@ async function createAttempt(exam: ExamMeta, sittingId: string, studentId: strin
   }[] = [];
 
   for (const section of sections) {
-    const questions = section.questions.map((question) => ({
-      versionId: question.questionVersionId,
-      sectionId: section.id,
-      marks: Number(question.version.marks),
-      optionOrder: (shuffleOptions
-        ? shuffle(question.version.options.map((option) => option.position))
-        : question.version.options.map((option) => option.position)),
-    }));
+    const questions = section.questions.map((question) => {
+      const marks = Number(question.version?.marks);
+      return {
+        versionId: question.questionVersionId,
+        sectionId: section.id,
+        marks: Number.isFinite(marks) && marks > 0 ? marks : 1,
+        optionOrder: (shuffleOptions
+          ? shuffle((question.version?.options || []).map((option) => option.position))
+          : (question.version?.options || []).map((option) => option.position)),
+      };
+    });
     planned.push(...(shuffleQuestions ? shuffle(questions) : questions));
   }
 
@@ -306,7 +315,7 @@ async function createAttempt(exam: ExamMeta, sittingId: string, studentId: strin
     );
   }
 
-  const totalMarks = planned.reduce((sum, question) => sum + question.marks, 0);
+  const totalMarks = Math.max(1, planned.reduce((sum, question) => sum + question.marks, 0));
   const now = new Date();
   const durationMin = exam.durationMin ?? 60;
   const deadline = new Date(now.getTime() + durationMin * 60 * 1000);
@@ -361,6 +370,10 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
   const body = startSchema.parse(req.body);
   const exam = await findPublicExam(slug);
 
+  if (exam.status !== 'APPROVED') {
+    throw Errors.conflict('EXAM_NOT_SCHEDULED', 'This examination has not been scheduled by an Administrator yet. Please check back later.');
+  }
+
   const state = windowState(exam);
   if (state === 'NOT_OPEN') {
     throw Errors.conflict('EXAM_NOT_OPEN', 'This exam has not opened yet.', {
@@ -376,7 +389,13 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
   }
 
   let codeValid = false;
-  if (exam.publicAccessCodeHash) {
+  const inputCode = body.accessCode.trim().toUpperCase();
+  const plainCode = ((settingsOf(exam) as any).accessCode as string | undefined)?.trim().toUpperCase();
+
+  if (plainCode && inputCode === plainCode) {
+    codeValid = true;
+  }
+  if (!codeValid && exam.publicAccessCodeHash) {
     codeValid = await bcrypt.compare(body.accessCode.trim(), exam.publicAccessCodeHash);
   }
   if (!codeValid && exam.sittings[0]?.accessCodeHash) {

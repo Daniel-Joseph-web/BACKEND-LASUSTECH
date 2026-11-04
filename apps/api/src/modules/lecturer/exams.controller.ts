@@ -202,6 +202,8 @@ const presentExam = (exam: ExamDetail & { _count?: { sections: number } }) => ({
   passMark: exam.passMark,
   settings: exam.settings,
   publicSlug: exam.publicSlug,
+  publicLink: exam.audience === 'PUBLIC' && exam.publicSlug ? `/exam/${exam.publicSlug}` : null,
+  accessCode: ((exam.settings ?? {}) as Record<string, any>).accessCode ?? null,
   requiresCode: Boolean(exam.publicAccessCodeHash),
   publicOpensAt: exam.publicOpensAt,
   publicClosesAt: exam.publicClosesAt,
@@ -209,7 +211,7 @@ const presentExam = (exam: ExamDetail & { _count?: { sections: number } }) => ({
   createdAt: exam.createdAt,
   publicUrl:
     exam.audience === 'PUBLIC' && exam.publicSlug
-      ? `${env.WEB_ORIGIN.replace(/\/$/, '')}/exam/${exam.publicSlug}`
+      ? ((env.WEB_ORIGIN || '').replace(/\/$/, '') ? `${(env.WEB_ORIGIN || '').replace(/\/$/, '')}/exam/${exam.publicSlug}` : `/exam/${exam.publicSlug}`)
       : null,
   sittings: exam.sittings,
   sections: exam.sections.map((section) => ({

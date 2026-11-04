@@ -117,6 +117,7 @@ export async function scoreAttempt(
   let rawScore = 0;
   let maxScore = 0;
   const sectionTotals = new Map<string, { score: number; max: number }>();
+  const examSettings = await getGroup('exam');
 
   for (const question of attempt.questions) {
     const marks = Number(question.weightedMarks);
@@ -134,8 +135,6 @@ export async function scoreAttempt(
       correct.size > 0 &&
       selected.size === correct.size &&
       [...selected].every((position) => correct.has(position));
-
-    const examSettings = await getGroup('exam');
 
     if (isCorrect) {
       rawScore += marks;

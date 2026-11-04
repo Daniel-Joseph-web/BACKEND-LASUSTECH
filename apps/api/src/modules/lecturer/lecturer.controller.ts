@@ -110,39 +110,46 @@ export const listExams = async (req: Request, res: Response) => {
   });
 
   res.json({
-    data: exams.map((exam) => ({
-      id: exam.id,
-      title: exam.title,
-      kind: exam.kind,
-      kindLabel: exam.kindLabel,
-      audience: exam.audience,
-      status: exam.status,
-      courseId: exam.courseId,
-      subjectId: exam.subjectId,
-      course: exam.course,
-      subject: exam.subject,
-      ownerLabel: exam.course
-        ? `${exam.course.code} — ${exam.course.title}`
-        : `${exam.subject?.name ?? 'Custom exam'}${exam.subject?.level ? ` (${exam.subject.level})` : ''}`,
-      institutionName: exam.institutionName,
-      levelLabel: exam.levelLabel,
-      examBoard: exam.examBoard,
-      durationMin: exam.durationMin,
-      passMark: exam.passMark,
-      publicSlug: exam.publicSlug,
-      publicUrl:
-        exam.audience === 'PUBLIC' && exam.publicSlug
-          ? `${env.WEB_ORIGIN.replace(/\/$/, '')}/exam/${exam.publicSlug}`
-          : null,
-      publicOpensAt: exam.publicOpensAt,
-      publicClosesAt: exam.publicClosesAt,
-      publishedAt: exam.publishedAt,
-      settings: exam.settings,
-      sectionCount: exam._count.sections,
-      questionCount: exam.sections.reduce((sum, section) => sum + section._count.questions, 0),
-      sittingCount: exam._count.sittings,
-      attemptCount: exam.sittings.reduce((sum, sitting) => sum + sitting._count.attempts, 0),
-      createdAt: exam.createdAt,
-    })),
+    data: exams.map((exam) => {
+      const examSettings = ((exam.settings ?? {}) as Record<string, any>);
+      const accessCode = (examSettings.accessCode as string | undefined) ?? null;
+      const publicLink = exam.audience === 'PUBLIC' && exam.publicSlug ? `/exam/${exam.publicSlug}` : null;
+      const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+      const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
+
+      return {
+        id: exam.id,
+        title: exam.title,
+        kind: exam.kind,
+        kindLabel: exam.kindLabel,
+        audience: exam.audience,
+        status: exam.status,
+        courseId: exam.courseId,
+        subjectId: exam.subjectId,
+        course: exam.course,
+        subject: exam.subject,
+        ownerLabel: exam.course
+          ? `${exam.course.code} — ${exam.course.title}`
+          : `${exam.subject?.name ?? 'Custom exam'}${exam.subject?.level ? ` (${exam.subject.level})` : ''}`,
+        institutionName: exam.institutionName,
+        levelLabel: exam.levelLabel,
+        examBoard: exam.examBoard,
+        durationMin: exam.durationMin,
+        passMark: exam.passMark,
+        publicSlug: exam.publicSlug,
+        publicLink,
+        publicUrl,
+        accessCode,
+        publicOpensAt: exam.publicOpensAt,
+        publicClosesAt: exam.publicClosesAt,
+        publishedAt: exam.publishedAt,
+        settings: exam.settings,
+        sectionCount: exam._count.sections,
+        questionCount: exam.sections.reduce((sum, section) => sum + section._count.questions, 0),
+        sittingCount: exam._count.sittings,
+        attemptCount: exam.sittings.reduce((sum, sitting) => sum + sitting._count.attempts, 0),
+        createdAt: exam.createdAt,
+      };
+    }),
   });
 };
