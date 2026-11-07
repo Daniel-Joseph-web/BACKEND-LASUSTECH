@@ -11,6 +11,7 @@ import { getGroup } from '../../lib/settings';
 import { lagosDateTime, notifyUsers } from '../../lib/notify';
 import { publishRealtimeEvent } from '../../lib/realtime';
 import { closeExpiredSittings } from '../student/student.service';
+import { env } from '../../config/env';
 
 const sittingInclude = {
   exam: {
@@ -666,8 +667,10 @@ export const updateSitting = async (req: Request, res: Response) => {
 export const regenerateAccessCode = async (req: Request, res: Response) => {
   const id = uuidParam(req);
   const actor = actorFrom(req, res);
-  const sitting = await prisma.sitting.findUnique({
-    where: { id },
+  let sitting = await prisma.sitting.findFirst({
+    where: {
+      OR: [{ id }, { examId: id }],
+    },
     include: {
       exam: {
         select: {
@@ -686,8 +689,82 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
       students: { select: { studentId: true } },
       invigilators: { select: { userId: true } },
     },
+    orderBy: { createdAt: 'desc' },
   });
-  if (!sitting) throw Errors.notFound('Sitting');
+
+  if (!sitting) {
+    // Check if the parameter is an exam directly
+    const exam = await prisma.exam.findUnique({
+      where: { id },
+      include: {
+        course: { select: { code: true } },
+        subject: { select: { name: true } },
+      },
+    });
+    if (!exam) throw Errors.notFound('Sitting or Exam');
+
+    const isPublic = exam.audience === 'PUBLIC';
+    const accessCode = generateAccessCode();
+    const accessCodeHash = await hashAccessCode(accessCode);
+    const courseLabel = exam.course ? exam.course.code : (exam.subject?.name ?? exam.title);
+    const slug = exam.publicSlug || exam.id;
+    const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+    const publicLink = `/public/exam/${slug}`;
+    const publicUrl = origin ? `${origin}${publicLink}` : publicLink;
+
+    const courseLecturers = exam.courseId
+      ? await prisma.courseAssignment.findMany({
+          where: { courseId: exam.courseId },
+          select: { userId: true },
+        })
+      : [];
+    const subjectCreator = exam.subjectId
+      ? await prisma.subject.findUnique({
+          where: { id: exam.subjectId },
+          select: { createdBy: true },
+        })
+      : null;
+
+    const staffRecipients = [...new Set([
+      exam.createdBy,
+      ...courseLecturers.map((c) => c.userId),
+      subjectCreator?.createdBy,
+      actor.actorId,
+    ].filter(Boolean))] as string[];
+
+    await prisma.$transaction(async (tx) => {
+      const currentExamSettings = ((exam.settings ?? {}) as Record<string, any>);
+      await tx.exam.update({
+        where: { id: exam.id },
+        data: {
+          settings: { ...currentExamSettings, accessCode },
+          publicAccessCodeHash: accessCodeHash,
+        },
+      });
+      await writeAudit(tx, actor, {
+        action: 'exam.access_code',
+        targetType: 'Exam',
+        targetId: exam.id,
+        after: { regenerated: true },
+      });
+
+      if (staffRecipients.length > 0) {
+        await notifyUsers(
+          tx,
+          staffRecipients,
+          {
+            type: 'EXAM_REMINDER',
+            title: `Updated Exam Access Code: ${courseLabel}`,
+            body: `The access code for ${courseLabel} is: ${accessCode}. Exam Link: ${publicUrl}.`,
+            meta: { kind: 'ACCESS_CODE', examId: exam.id, accessCode, examUrl: publicUrl, href: `/lecturer/exams/${exam.id}/preview` },
+          },
+        );
+      }
+    });
+
+    return res.json({ data: { id: exam.id, examId: exam.id, accessCode, publicLink, publicUrl } });
+  }
+
   if (sitting.status === 'CLOSED' || sitting.status === 'CANCELLED') {
     throw Errors.conflict('SITTING_FINISHED', 'This sitting can no longer be edited.');
   }
@@ -696,7 +773,7 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
   const accessCode = generateAccessCode();
   const accessCodeHash = await hashAccessCode(accessCode);
   const courseLabel = sitting.exam.course ? sitting.exam.course.code : (sitting.exam.subject?.name ?? sitting.exam.title);
-  const examUrl = isPublic && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${id}/start?code=${accessCode}`;
+  const examUrl = isPublic && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${sitting.id}/start?code=${accessCode}`;
 
   const courseLecturers = sitting.exam.courseId
     ? await prisma.courseAssignment.findMany({
@@ -809,7 +886,49 @@ export const getSittingAccessCode = async (req: Request, res: Response) => {
     orderBy: { createdAt: 'desc' },
   });
 
-  if (!sitting) throw Errors.notFound('Sitting or Exam');
+  if (!sitting) {
+    const exam = await prisma.exam.findUnique({
+      where: { id: paramId },
+      select: {
+        id: true,
+        title: true,
+        audience: true,
+        publicSlug: true,
+        settings: true,
+      },
+    });
+    if (!exam) throw Errors.notFound('Sitting or Exam');
+
+    const examSettings = ((exam.settings ?? {}) as Record<string, any>);
+    let code: string | null = (examSettings.accessCode as string | undefined) ?? null;
+
+    if (!code) {
+      code = generateAccessCode();
+      const hash = await hashAccessCode(code);
+      await prisma.exam.update({
+        where: { id: exam.id },
+        data: {
+          settings: { ...examSettings, accessCode: code },
+          publicAccessCodeHash: hash,
+        },
+      });
+    }
+
+    const slug = exam.publicSlug || exam.id;
+    const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+    const publicLink = `/public/exam/${slug}`;
+    const publicUrl = origin ? `${origin}${publicLink}` : publicLink;
+
+    return res.json({
+      data: {
+        id: exam.id,
+        examId: exam.id,
+        accessCode: code,
+        publicLink,
+        publicUrl,
+      },
+    });
+  }
 
   const examSettings = ((sitting.exam.settings ?? {}) as Record<string, any>);
   let code: string | null = (examSettings.accessCode as string | undefined) ?? null;
@@ -848,9 +967,10 @@ export const getSittingAccessCode = async (req: Request, res: Response) => {
     ]);
   }
 
-  const publicLink = sitting.exam.audience === 'PUBLIC' && sitting.exam.publicSlug
-    ? `/exam/${sitting.exam.publicSlug}`
-    : null;
+  const slug = sitting.exam.publicSlug || sitting.exam.id;
+  const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+  const publicLink = sitting.exam.audience === 'PUBLIC' ? `/public/exam/${slug}` : null;
+  const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
 
   res.json({
     data: {
@@ -858,6 +978,7 @@ export const getSittingAccessCode = async (req: Request, res: Response) => {
       examId: sitting.exam.id,
       accessCode: code,
       publicLink,
+      publicUrl,
     },
   });
 };

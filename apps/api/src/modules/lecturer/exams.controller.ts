@@ -282,10 +282,12 @@ export const createExam = async (req: Request, res: Response) => {
 
   const now = new Date();
   const slug = body.audience === 'PUBLIC' ? crypto.randomBytes(16).toString('base64url') : null;
-  const codeHash = body.accessCode ? await bcrypt.hash(body.accessCode, 10) : null;
+  const accessCode = body.accessCode?.trim() || (body.audience === 'PUBLIC' ? crypto.randomInt(100000, 999999).toString() : undefined);
+  const codeHash = accessCode ? await bcrypt.hash(accessCode, 10) : null;
 
   const settings = {
     ...body.settings,
+    ...(accessCode ? { accessCode } : {}),
     ...(body.durationMin ? { durationMin: body.durationMin } : {}),
     ...(body.passMark !== undefined ? { passMark: body.passMark } : {}),
   } as Prisma.InputJsonValue;
@@ -426,6 +428,7 @@ export const updateExam = async (req: Request, res: Response) => {
       courseId: true,
       subjectId: true,
       status: true,
+      settings: true,
       _count: { select: { sittings: true } },
     },
   });
@@ -439,6 +442,26 @@ export const updateExam = async (req: Request, res: Response) => {
   const scope: ExamScope = exam.courseId
     ? { courseId: exam.courseId }
     : { subjectId: exam.subjectId };
+
+  const currentSettings = ((exam.settings ?? {}) as Record<string, any>);
+  const newSettings = body.settings !== undefined || body.accessCode !== undefined
+    ? {
+        ...currentSettings,
+        ...(body.settings ? body.settings : {}),
+        ...(body.accessCode !== undefined
+          ? body.accessCode === null
+            ? { accessCode: null }
+            : { accessCode: body.accessCode }
+          : {}),
+      }
+    : undefined;
+
+  const accessCodeHash =
+    body.accessCode === undefined
+      ? undefined
+      : body.accessCode === null
+        ? null
+        : await bcrypt.hash(body.accessCode, 10);
 
   await prisma.$transaction(async (tx) => {
     await tx.exam.update({
@@ -455,20 +478,24 @@ export const updateExam = async (req: Request, res: Response) => {
             : body.passMark === null
               ? null
               : new Prisma.Decimal(body.passMark),
-        settings: body.settings as Prisma.InputJsonValue | undefined,
+        settings: newSettings as Prisma.InputJsonValue | undefined,
         institutionName: body.institutionName,
         levelLabel: body.levelLabel,
         examBoard: body.examBoard,
         publicOpensAt: body.publicOpensAt ? new Date(body.publicOpensAt) : body.publicOpensAt,
         publicClosesAt: body.publicClosesAt ? new Date(body.publicClosesAt) : body.publicClosesAt,
-        publicAccessCodeHash:
-          body.accessCode === undefined
-            ? undefined
-            : body.accessCode === null
-              ? null
-              : await bcrypt.hash(body.accessCode, 10),
+        publicAccessCodeHash: accessCodeHash,
       },
     });
+
+    if (body.accessCode !== undefined && accessCodeHash !== undefined) {
+      await tx.sitting.updateMany({
+        where: { examId: id },
+        data: {
+          accessCodeHash: accessCodeHash ?? '',
+        },
+      });
+    }
 
     if (body.sections) {
       const sections = await tx.examSection.findMany({
@@ -687,4 +714,128 @@ export const submitExamForModeration = async (req: Request, res: Response) => {
   });
 
   res.json({ data: published });
+};
+
+// --- Access Code Retrieval & Regeneration for Lecturers ---
+export const getExamAccessCode = async (req: Request, res: Response) => {
+  const id = uuidParam(req);
+  const exam = await prisma.exam.findFirst({
+    where: { id, ...ownedExamWhere(req.auth!.userId) },
+    select: {
+      id: true,
+      title: true,
+      audience: true,
+      publicSlug: true,
+      settings: true,
+      publicAccessCodeHash: true,
+      sittings: {
+        select: { id: true, accessCodeHash: true },
+        take: 1,
+      },
+    },
+  });
+  if (!exam) throw Errors.notFound('Exam');
+
+  const settingsObj = ((exam.settings ?? {}) as Record<string, any>);
+  let code = (settingsObj.accessCode as string | undefined) ?? null;
+
+  if (!code) {
+    code = crypto.randomInt(100000, 999999).toString();
+    const hash = await bcrypt.hash(code, 10);
+    const updatedSettings = { ...settingsObj, accessCode: code };
+
+    await prisma.$transaction(async (tx) => {
+      await tx.exam.update({
+        where: { id },
+        data: {
+          settings: updatedSettings as Prisma.InputJsonValue,
+          publicAccessCodeHash: hash,
+        },
+      });
+      if (exam.sittings[0]) {
+        await tx.sitting.update({
+          where: { id: exam.sittings[0].id },
+          data: { accessCodeHash: hash },
+        });
+      }
+    });
+  }
+
+  const slug = exam.publicSlug || exam.id;
+  const webOrigin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+  const publicLink = `/public/exam/${slug}`;
+  const publicUrl = webOrigin ? `${webOrigin}/public/exam/${slug}` : publicLink;
+
+  res.json({
+    data: {
+      id: exam.id,
+      accessCode: code,
+      publicSlug: exam.publicSlug,
+      publicLink,
+      publicUrl,
+    },
+  });
+};
+
+export const regenerateExamAccessCode = async (req: Request, res: Response) => {
+  const id = uuidParam(req);
+  const actor = actorFrom(req, res);
+  const exam = await prisma.exam.findFirst({
+    where: { id, ...ownedExamWhere(actor.actorId) },
+    select: {
+      id: true,
+      title: true,
+      audience: true,
+      publicSlug: true,
+      settings: true,
+      sittings: {
+        select: { id: true },
+      },
+    },
+  });
+  if (!exam) throw Errors.notFound('Exam');
+
+  const newCode = crypto.randomInt(100000, 999999).toString();
+  const newHash = await bcrypt.hash(newCode, 10);
+  const settingsObj = ((exam.settings ?? {}) as Record<string, any>);
+  const updatedSettings = { ...settingsObj, accessCode: newCode };
+
+  await prisma.$transaction(async (tx) => {
+    await tx.exam.update({
+      where: { id },
+      data: {
+        settings: updatedSettings as Prisma.InputJsonValue,
+        publicAccessCodeHash: newHash,
+      },
+    });
+
+    if (exam.sittings.length > 0) {
+      await tx.sitting.updateMany({
+        where: { examId: id },
+        data: { accessCodeHash: newHash },
+      });
+    }
+
+    await writeAudit(tx, actor, {
+      action: 'exam.regenerate_access_code',
+      targetType: 'Exam',
+      targetId: id,
+      after: { accessCodeUpdated: true },
+    });
+  });
+
+  const slug = exam.publicSlug || exam.id;
+  const webOrigin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+  const publicLink = `/public/exam/${slug}`;
+  const publicUrl = webOrigin ? `${webOrigin}/public/exam/${slug}` : publicLink;
+
+  res.json({
+    data: {
+      id: exam.id,
+      accessCode: newCode,
+      publicSlug: exam.publicSlug,
+      publicLink,
+      publicUrl,
+    },
+  });
 };

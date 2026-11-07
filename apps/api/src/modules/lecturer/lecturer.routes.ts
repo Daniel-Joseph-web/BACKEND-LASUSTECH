@@ -10,7 +10,9 @@ import {
   createExam,
   deleteExam,
   getAvailableQuestionCounts,
+  getExamAccessCode,
   getExamById,
+  regenerateExamAccessCode,
   saveExamDraft,
   submitExamForModeration,
   updateExam,
@@ -94,6 +96,8 @@ lecturerRouter.delete('/media/:id', deleteMedia);
 lecturerRouter.get('/exams', listExams);
 lecturerRouter.post('/exams', createExam);
 lecturerRouter.get('/exams/:id', getExamById);
+lecturerRouter.get('/exams/:id/access-code', getExamAccessCode);
+lecturerRouter.post('/exams/:id/access-code', regenerateExamAccessCode);
 lecturerRouter.patch('/exams/:id', updateExam);
 lecturerRouter.delete('/exams/:id', deleteExam);
 

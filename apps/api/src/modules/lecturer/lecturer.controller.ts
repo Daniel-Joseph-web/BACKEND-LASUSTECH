@@ -101,9 +101,18 @@ export const listExams = async (req: Request, res: Response) => {
       course: { select: { id: true, code: true, title: true, level: true } },
       subject: { select: { id: true, name: true, code: true, level: true, institution: true } },
       sections: { select: { _count: { select: { questions: true } } } },
-      // A sitting may host attempts (a public exam's hidden sitting is where
-      // every anonymous candidate lands), so candidates are counted through it.
-      sittings: { select: { _count: { select: { attempts: true } } } },
+      sittings: {
+        select: {
+          id: true,
+          startsAt: true,
+          endsAt: true,
+          status: true,
+          venue: true,
+          requireWebcam: true,
+          _count: { select: { attempts: true } },
+        },
+        orderBy: { startsAt: 'desc' },
+      },
       _count: { select: { sections: true, sittings: true } },
     },
     orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
@@ -113,9 +122,10 @@ export const listExams = async (req: Request, res: Response) => {
     data: exams.map((exam) => {
       const examSettings = ((exam.settings ?? {}) as Record<string, any>);
       const accessCode = (examSettings.accessCode as string | undefined) ?? null;
-      const publicLink = exam.audience === 'PUBLIC' && exam.publicSlug ? `/exam/${exam.publicSlug}` : null;
+      const publicLink = exam.audience === 'PUBLIC' && exam.publicSlug ? `/public/exam/${exam.publicSlug}` : null;
       const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
       const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
+      const latestSitting = exam.sittings[0] ?? null;
 
       return {
         id: exam.id,
@@ -144,6 +154,16 @@ export const listExams = async (req: Request, res: Response) => {
         publicClosesAt: exam.publicClosesAt,
         publishedAt: exam.publishedAt,
         settings: exam.settings,
+        sitting: latestSitting
+          ? {
+              id: latestSitting.id,
+              startsAt: latestSitting.startsAt,
+              endsAt: latestSitting.endsAt,
+              status: latestSitting.status,
+              venue: latestSitting.venue,
+              requireWebcam: latestSitting.requireWebcam,
+            }
+          : null,
         sectionCount: exam._count.sections,
         questionCount: exam.sections.reduce((sum, section) => sum + section._count.questions, 0),
         sittingCount: exam._count.sittings,

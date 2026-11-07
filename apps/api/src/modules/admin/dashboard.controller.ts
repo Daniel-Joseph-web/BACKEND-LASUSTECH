@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express';
 import { prisma } from '../../lib/prisma';
 import { fmtDay, LAGOS_OFFSET_MS, todayLagos } from '../../lib/http';
 import { targetLabel } from '../../lib/audit';
+import { env } from '../../config/env';
 
 const DAYS = 30;
 const DAY_MS = 86_400_000;
@@ -36,13 +37,73 @@ export const getDashboard = async (_req: Request, res: Response, next: NextFunct
       prisma.$queryRaw<{ n: number }[]>`SELECT COUNT(DISTINCT user_id)::int AS n FROM auth_sessions WHERE created_at >= ${d14} AND created_at < ${d7}`,
     ]);
 
-    const [examsToday, examsLive, alerts, alertsHigh, recent] = await Promise.all([
+    const [examsToday, examsLive, alerts, alertsHigh, recent, activeExamsList] = await Promise.all([
       prisma.sitting.count({ where: { startsAt: { gte: dayStart, lt: dayEnd }, status: { not: 'CANCELLED' } } }),
       prisma.sitting.count({ where: { status: 'OPEN' } }),
       prisma.flag.count({ where: { reviewedAt: null } }),
       prisma.flag.count({ where: { reviewedAt: null, severity: 'HIGH' } }),
       prisma.auditLog.findMany({ take: 8, orderBy: { id: 'desc' }, include: { actor: { select: { names: true } } } }),
+      prisma.exam.findMany({
+        where: {
+          OR: [
+            { audience: 'PUBLIC' },
+            { sittings: { some: { status: { in: ['OPEN', 'SCHEDULED'] } } } },
+          ],
+        },
+        take: 15,
+        orderBy: [{ publishedAt: 'desc' }, { createdAt: 'desc' }],
+        include: {
+          course: { select: { code: true, title: true } },
+          subject: { select: { name: true, code: true } },
+          sittings: {
+            select: {
+              id: true,
+              startsAt: true,
+              endsAt: true,
+              status: true,
+              venue: true,
+              durationMin: true,
+              requireWebcam: true,
+            },
+            orderBy: { startsAt: 'desc' },
+            take: 1,
+          },
+          sections: { select: { _count: { select: { questions: true } } } },
+        },
+      }),
     ]);
+
+    const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+    const activeExams = activeExamsList.map((exam) => {
+      const sitting = exam.sittings[0] ?? null;
+      const settingsObj = ((exam.settings ?? {}) as Record<string, any>);
+      const code = (settingsObj.accessCode as string | undefined) ?? null;
+      const slug = exam.publicSlug || exam.id;
+      const publicLink = exam.audience === 'PUBLIC' ? `/public/exam/${slug}` : null;
+      const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
+      const totalQuestions = exam.sections.reduce((sum, s) => sum + s._count.questions, 0);
+
+      return {
+        id: exam.id,
+        title: exam.title,
+        courseCode: exam.course?.code ?? exam.subject?.code ?? 'EXAM',
+        courseTitle: exam.course?.title ?? exam.subject?.name ?? exam.title,
+        audience: exam.audience,
+        status: sitting?.status ?? exam.status,
+        durationMin: exam.durationMin ?? sitting?.durationMin ?? 60,
+        passMark: exam.passMark ? Number(exam.passMark) : null,
+        questionCount: totalQuestions,
+        sittingId: sitting?.id ?? null,
+        startsAt: sitting?.startsAt ? sitting.startsAt.toISOString() : exam.publicOpensAt?.toISOString() ?? null,
+        endsAt: sitting?.endsAt ? sitting.endsAt.toISOString() : exam.publicClosesAt?.toISOString() ?? null,
+        venue: sitting?.venue ?? null,
+        requireWebcam: sitting?.requireWebcam ?? false,
+        accessCode: code,
+        publicSlug: exam.publicSlug,
+        publicLink,
+        publicUrl,
+      };
+    });
 
     const logins = new Map(loginRows.map((r) => [r.day, r.n]));
     const exams = new Map(examRows.map((r) => [r.day, r.n]));
@@ -59,6 +120,7 @@ export const getDashboard = async (_req: Request, res: Response, next: NextFunct
           openAlerts: { total: alerts, high: alertsHigh },
           uptimeSeconds: Math.floor(process.uptime()),
         },
+        activeExams,
         series,
         health: [
           { name: 'API', status: 'ok', latencyMs: 0 },
