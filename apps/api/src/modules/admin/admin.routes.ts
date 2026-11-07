@@ -96,6 +96,8 @@ adminRouter.put('/settings/:group', updateSettings);
 
 // ---- Exams, venues and sittings (schedule builder) ----
 adminRouter.get('/exams', listSchedulableExams);
+adminRouter.get('/exams/:id/access-code', getSittingAccessCode);
+adminRouter.post('/exams/:id/access-code', regenerateAccessCode);
 adminRouter.get('/venues', listVenues);
 adminRouter.get('/invigilators', listInvigilators);
 adminRouter.get('/schedule', listSchedule);
