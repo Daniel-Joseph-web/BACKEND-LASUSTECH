@@ -64,6 +64,7 @@ export const getDashboard = async (_req: Request, res: Response, next: NextFunct
               venue: true,
               durationMin: true,
               requireWebcam: true,
+              isPublic: true,
             },
             orderBy: { startsAt: 'desc' },
             take: 1,
@@ -79,7 +80,7 @@ export const getDashboard = async (_req: Request, res: Response, next: NextFunct
       const settingsObj = ((exam.settings ?? {}) as Record<string, any>);
       const code = (settingsObj.accessCode as string | undefined) ?? null;
       const slug = exam.publicSlug || exam.id;
-      const publicLink = exam.audience === 'PUBLIC' ? `/public/exam/${slug}` : null;
+      const publicLink = (exam.audience === 'PUBLIC' || sitting?.isPublic) ? `/exam/${slug}` : null;
       const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
       const totalQuestions = exam.sections.reduce((sum, s) => sum + s._count.questions, 0);
 

@@ -102,7 +102,11 @@ const isUuid = (val: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
 
 async function findPublicExam(slug: string) {
-  const cleanSlug = String(slug || '').trim();
+  let cleanSlug = String(slug || '').trim();
+  try {
+    cleanSlug = decodeURIComponent(cleanSlug).trim();
+  } catch {}
+
   const validUuid = isUuid(cleanSlug);
 
   const orConditions: Prisma.ExamWhereInput[] = [
@@ -116,7 +120,14 @@ async function findPublicExam(slug: string) {
   let exam = await prisma.exam.findFirst({
     where: {
       OR: orConditions,
-      audience: 'PUBLIC',
+      AND: [
+        {
+          OR: [
+            { audience: 'PUBLIC' },
+            { sittings: { some: { isPublic: true } } },
+          ],
+        },
+      ],
     },
     include: examMetaInclude,
   });
@@ -143,9 +154,9 @@ async function findPublicExam(slug: string) {
 
   if (!exam) throw Errors.notFound('Exam');
 
-  // Auto-heal missing publicSlug or accessCode on the exam
+  // Auto-heal missing publicSlug or accessCode or audience on the exam
   const currentSettings = ((exam.settings ?? {}) as Record<string, any>);
-  if (!exam.publicSlug || !currentSettings.accessCode) {
+  if (!exam.publicSlug || !currentSettings.accessCode || exam.audience !== 'PUBLIC') {
     let code = currentSettings.accessCode as string | undefined;
     let codeHash = exam.publicAccessCodeHash;
     if (!code) {
@@ -154,6 +165,7 @@ async function findPublicExam(slug: string) {
     }
     const updateData: Prisma.ExamUpdateInput = {
       ...(!exam.publicSlug ? { publicSlug: exam.id } : {}),
+      ...(exam.audience !== 'PUBLIC' ? { audience: 'PUBLIC' } : {}),
       ...(!currentSettings.accessCode ? { settings: { ...currentSettings, accessCode: code }, publicAccessCodeHash: codeHash } : {}),
     };
     await prisma.exam.update({

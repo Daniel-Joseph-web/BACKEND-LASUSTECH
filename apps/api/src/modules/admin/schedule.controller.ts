@@ -755,7 +755,7 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
     const courseLabel = exam.course ? exam.course.code : (exam.subject?.name ?? exam.title);
     const slug = exam.publicSlug || exam.id;
     const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
-    const publicLink = `/public/exam/${slug}`;
+    const publicLink = `/exam/${slug}`;
     const publicUrl = origin ? `${origin}${publicLink}` : publicLink;
 
     const courseLecturers = exam.courseId
@@ -990,7 +990,7 @@ export const getSittingAccessCode = async (req: Request, res: Response) => {
 
     const slug = exam.publicSlug || exam.id;
     const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
-    const publicLink = `/public/exam/${slug}`;
+    const publicLink = `/exam/${slug}`;
     const publicUrl = origin ? `${origin}${publicLink}` : publicLink;
 
     return res.json({
@@ -1043,7 +1043,8 @@ export const getSittingAccessCode = async (req: Request, res: Response) => {
 
   const slug = sitting.exam.publicSlug || sitting.exam.id;
   const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
-  const publicLink = sitting.exam.audience === 'PUBLIC' ? `/public/exam/${slug}` : null;
+  const isPublic = sitting.isPublic || sitting.exam.audience === 'PUBLIC';
+  const publicLink = isPublic ? `/exam/${slug}` : null;
   const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
 
   res.json({

@@ -763,8 +763,8 @@ export const getExamAccessCode = async (req: Request, res: Response) => {
 
   const slug = exam.publicSlug || exam.id;
   const webOrigin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
-  const publicLink = `/public/exam/${slug}`;
-  const publicUrl = webOrigin ? `${webOrigin}/public/exam/${slug}` : publicLink;
+  const publicLink = `/exam/${slug}`;
+  const publicUrl = webOrigin ? `${webOrigin}/exam/${slug}` : publicLink;
 
   res.json({
     data: {
@@ -826,8 +826,8 @@ export const regenerateExamAccessCode = async (req: Request, res: Response) => {
 
   const slug = exam.publicSlug || exam.id;
   const webOrigin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
-  const publicLink = `/public/exam/${slug}`;
-  const publicUrl = webOrigin ? `${webOrigin}/public/exam/${slug}` : publicLink;
+  const publicLink = `/exam/${slug}`;
+  const publicUrl = webOrigin ? `${webOrigin}/exam/${slug}` : publicLink;
 
   res.json({
     data: {

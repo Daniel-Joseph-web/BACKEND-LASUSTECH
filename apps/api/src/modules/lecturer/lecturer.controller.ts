@@ -109,6 +109,7 @@ export const listExams = async (req: Request, res: Response) => {
           status: true,
           venue: true,
           requireWebcam: true,
+          isPublic: true,
           _count: { select: { attempts: true } },
         },
         orderBy: { startsAt: 'desc' },
@@ -122,7 +123,9 @@ export const listExams = async (req: Request, res: Response) => {
     data: exams.map((exam) => {
       const examSettings = ((exam.settings ?? {}) as Record<string, any>);
       const accessCode = (examSettings.accessCode as string | undefined) ?? null;
-      const publicLink = exam.audience === 'PUBLIC' && exam.publicSlug ? `/public/exam/${exam.publicSlug}` : null;
+      const slug = exam.publicSlug || exam.id;
+      const isPublic = exam.audience === 'PUBLIC' || exam.sittings.some((s) => s.isPublic);
+      const publicLink = isPublic ? `/exam/${slug}` : null;
       const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
       const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
       const latestSitting = exam.sittings[0] ?? null;

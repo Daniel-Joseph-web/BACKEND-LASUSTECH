@@ -18,6 +18,26 @@ interface MemoryBucket {
 
 const memoryStore = new Map<string, MemoryBucket>();
 
+// Circuit breaker for Redis: if Redis quota is exceeded or connection fails, bypass Redis for 15 minutes
+let redisCircuitBreakerUntil = 0;
+let redisWarned = false;
+
+function isRedisUsable(): boolean {
+  if (Date.now() < redisCircuitBreakerUntil) {
+    return false;
+  }
+  return redisConnection.status === 'ready';
+}
+
+function tripRedisCircuitBreaker(err: any) {
+  redisCircuitBreakerUntil = Date.now() + 15 * 60 * 1000; // 15 minutes
+  if (!redisWarned) {
+    console.warn(`[RateLimiter] Redis temporarily disabled for 15m (falling back to memory): ${err?.message || err}`);
+    redisWarned = true;
+    setTimeout(() => { redisWarned = false; }, 15 * 60 * 1000);
+  }
+}
+
 // Clean up expired buckets periodically
 setInterval(() => {
   const now = Date.now();
@@ -46,7 +66,7 @@ export function createRateLimiter(options: RateLimiterOptions) {
     const key = `${prefix}:${keyGenerator(req)}`;
 
     try {
-      if (redisConnection.status === 'ready') {
+      if (isRedisUsable()) {
         const count = await redisConnection.incr(key);
         if (count === 1) {
           await redisConnection.expire(key, windowSec);
@@ -66,8 +86,7 @@ export function createRateLimiter(options: RateLimiterOptions) {
         return next();
       }
     } catch (err: any) {
-      // If Redis fails, seamlessly fall back to memoryStore
-      console.warn(`[RateLimiter] Redis error, falling back to memory: ${err.message}`);
+      tripRedisCircuitBreaker(err);
     }
 
     // In-memory fallback
@@ -148,7 +167,7 @@ export async function checkAccessCodeRateLimit(userId: string, sittingId: string
   const now = Date.now();
 
   try {
-    if (redisConnection.status === 'ready') {
+    if (isRedisUsable()) {
       const lockKey = `${key}:locked`;
       const isLocked = await redisConnection.get(lockKey);
       if (isLocked) {
@@ -162,6 +181,7 @@ export async function checkAccessCodeRateLimit(userId: string, sittingId: string
     }
   } catch (err: any) {
     if (err instanceof Errors.tooManyRequests) throw err;
+    tripRedisCircuitBreaker(err);
   }
 
   // Memory fallback
@@ -181,7 +201,7 @@ export async function recordFailedAccessCode(userId: string, sittingId: string) 
   const LOCK_DURATION_SEC = 300; // 5 minutes
 
   try {
-    if (redisConnection.status === 'ready') {
+    if (isRedisUsable()) {
       const count = await redisConnection.incr(key);
       if (count === 1) {
         await redisConnection.expire(key, LOCK_DURATION_SEC);
@@ -191,8 +211,8 @@ export async function recordFailedAccessCode(userId: string, sittingId: string) 
       }
       return;
     }
-  } catch {
-    // fallback
+  } catch (err: any) {
+    tripRedisCircuitBreaker(err);
   }
 
   const record = accessCodeFailures.get(key) || { count: 0, lockUntil: 0 };
@@ -206,10 +226,12 @@ export async function recordFailedAccessCode(userId: string, sittingId: string) 
 export async function clearFailedAccessCode(userId: string, sittingId: string) {
   const key = `ac:${userId}:${sittingId}`;
   try {
-    if (redisConnection.status === 'ready') {
+    if (isRedisUsable()) {
       await redisConnection.del(key);
       await redisConnection.del(`${key}:locked`);
     }
-  } catch {}
+  } catch (err: any) {
+    tripRedisCircuitBreaker(err);
+  }
   accessCodeFailures.delete(key);
 }
