@@ -677,42 +677,76 @@ export const updateSitting = async (req: Request, res: Response) => {
 };
 
 export const regenerateAccessCode = async (req: Request, res: Response) => {
-  const id = uuidParam(req);
+  const id = String(req.params.id ?? '').trim();
+  if (!id) throw Errors.badRequest('MISSING_ID', 'ID is required.');
   const actor = actorFrom(req, res);
-  let sitting = await prisma.sitting.findFirst({
-    where: {
-      OR: [{ id }, { examId: id }],
-    },
-    include: {
-      exam: {
-        select: {
-          id: true,
-          title: true,
-          createdBy: true,
-          courseId: true,
-          subjectId: true,
-          audience: true,
-          publicSlug: true,
-          settings: true,
-          course: { select: { code: true } },
-          subject: { select: { name: true } },
+  const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+  let sitting = validUuid
+    ? await prisma.sitting.findFirst({
+        where: {
+          OR: [{ id }, { examId: id }],
         },
-      },
-      students: { select: { studentId: true } },
-      invigilators: { select: { userId: true } },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+        include: {
+          exam: {
+            select: {
+              id: true,
+              title: true,
+              createdBy: true,
+              courseId: true,
+              subjectId: true,
+              audience: true,
+              publicSlug: true,
+              settings: true,
+              course: { select: { code: true } },
+              subject: { select: { name: true } },
+            },
+          },
+          students: { select: { studentId: true } },
+          invigilators: { select: { userId: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+    : await prisma.sitting.findFirst({
+        where: { exam: { publicSlug: id } },
+        include: {
+          exam: {
+            select: {
+              id: true,
+              title: true,
+              createdBy: true,
+              courseId: true,
+              subjectId: true,
+              audience: true,
+              publicSlug: true,
+              settings: true,
+              course: { select: { code: true } },
+              subject: { select: { name: true } },
+            },
+          },
+          students: { select: { studentId: true } },
+          invigilators: { select: { userId: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
 
   if (!sitting) {
     // Check if the parameter is an exam directly
-    const exam = await prisma.exam.findUnique({
-      where: { id },
-      include: {
-        course: { select: { code: true } },
-        subject: { select: { name: true } },
-      },
-    });
+    const exam = validUuid
+      ? await prisma.exam.findUnique({
+          where: { id },
+          include: {
+            course: { select: { code: true } },
+            subject: { select: { name: true } },
+          },
+        })
+      : await prisma.exam.findFirst({
+          where: { publicSlug: id },
+          include: {
+            course: { select: { code: true } },
+            subject: { select: { name: true } },
+          },
+        });
     if (!exam) throw Errors.notFound('Sitting or Exam');
 
     const isPublic = exam.audience === 'PUBLIC';
@@ -875,40 +909,68 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
 export const getSittingAccessCode = async (req: Request, res: Response) => {
   const paramId = String(req.params.id ?? '').trim();
   if (!paramId) throw Errors.badRequest('MISSING_ID', 'ID is required.');
+  const validUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(paramId);
 
-  // Find sitting by sitting ID or fallback to finding by exam ID
-  let sitting = await prisma.sitting.findFirst({
-    where: {
-      OR: [
-        { id: paramId },
-        { examId: paramId },
-      ],
-    },
-    include: {
-      exam: {
-        select: {
-          id: true,
-          title: true,
-          audience: true,
-          publicSlug: true,
-          settings: true,
+  // Find sitting by sitting ID or fallback to finding by exam ID or slug
+  let sitting = validUuid
+    ? await prisma.sitting.findFirst({
+        where: {
+          OR: [
+            { id: paramId },
+            { examId: paramId },
+          ],
         },
-      },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+        include: {
+          exam: {
+            select: {
+              id: true,
+              title: true,
+              audience: true,
+              publicSlug: true,
+              settings: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      })
+    : await prisma.sitting.findFirst({
+        where: { exam: { publicSlug: paramId } },
+        include: {
+          exam: {
+            select: {
+              id: true,
+              title: true,
+              audience: true,
+              publicSlug: true,
+              settings: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
 
   if (!sitting) {
-    const exam = await prisma.exam.findUnique({
-      where: { id: paramId },
-      select: {
-        id: true,
-        title: true,
-        audience: true,
-        publicSlug: true,
-        settings: true,
-      },
-    });
+    const exam = validUuid
+      ? await prisma.exam.findUnique({
+          where: { id: paramId },
+          select: {
+            id: true,
+            title: true,
+            audience: true,
+            publicSlug: true,
+            settings: true,
+          },
+        })
+      : await prisma.exam.findFirst({
+          where: { publicSlug: paramId },
+          select: {
+            id: true,
+            title: true,
+            audience: true,
+            publicSlug: true,
+            settings: true,
+          },
+        });
     if (!exam) throw Errors.notFound('Sitting or Exam');
 
     const examSettings = ((exam.settings ?? {}) as Record<string, any>);

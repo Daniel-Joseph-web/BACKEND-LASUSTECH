@@ -98,22 +98,31 @@ const examMeta = (exam: ExamMeta) => {
   };
 };
 
+const isUuid = (val: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val);
+
 async function findPublicExam(slug: string) {
   const cleanSlug = String(slug || '').trim();
+  const validUuid = isUuid(cleanSlug);
+
+  const orConditions: Prisma.ExamWhereInput[] = [
+    { publicSlug: cleanSlug },
+  ];
+  if (validUuid) {
+    orConditions.push({ id: cleanSlug });
+    orConditions.push({ sittings: { some: { id: cleanSlug } } });
+  }
+
   let exam = await prisma.exam.findFirst({
     where: {
-      OR: [
-        { publicSlug: cleanSlug },
-        { id: cleanSlug },
-        { sittings: { some: { id: cleanSlug } } },
-      ],
+      OR: orConditions,
       audience: 'PUBLIC',
     },
     include: examMetaInclude,
   });
 
-  // Fallback: If not found, check if a sitting exists with this ID or examId
-  if (!exam) {
+  // Fallback: If not found and it is a valid UUID, check if a sitting exists with this ID or examId
+  if (!exam && validUuid) {
     const sitting = await prisma.sitting.findFirst({
       where: {
         OR: [
