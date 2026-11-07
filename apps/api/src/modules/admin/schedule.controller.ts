@@ -23,6 +23,8 @@ const sittingInclude = {
       audience: true,
       publicSlug: true,
       settings: true,
+      durationMin: true,
+      passMark: true,
       course: { select: { id: true, code: true, title: true, level: true } },
       subject: { select: { id: true, name: true, level: true, institution: true } },
       session: { select: { id: true, name: true } },
@@ -43,8 +45,15 @@ const examLabel = (exam: SittingRow['exam']) =>
     : (exam.subject?.name ?? exam.title);
 
 const present = (s: SittingRow) => {
+  const isPublic = s.exam.audience === 'PUBLIC' || s.isPublic;
+  const slug = s.exam.publicSlug || s.exam.id;
+  const publicLink = isPublic ? `/exam/${slug}` : null;
+  const origin = (env.WEB_ORIGIN || '').replace(/\/$/, '');
+  const publicUrl = publicLink ? (origin ? `${origin}${publicLink}` : publicLink) : null;
+  const studentStartLink = `/student/exam/${s.id}/start`;
   const examSettings = ((s.exam.settings ?? {}) as Record<string, any>);
   const accessCode = (examSettings.accessCode as string | undefined) ?? null;
+
   return {
     id: s.id,
     examId: s.examId,
@@ -52,10 +61,13 @@ const present = (s: SittingRow) => {
     examKind: s.exam.kind,
     examStatus: s.exam.status,
     audience: s.exam.audience,
-    examSlug: s.exam.publicSlug ?? null,
-    publicLink: s.exam.audience === 'PUBLIC' && s.exam.publicSlug ? `/exam/${s.exam.publicSlug}` : null,
-    isPublic: s.exam.audience === 'PUBLIC',
+    examSlug: slug,
+    publicLink,
+    publicUrl,
+    studentStartLink,
+    isPublic,
     accessCode,
+    passMark: s.exam.passMark ? Number(s.exam.passMark) : null,
     courseId: s.exam.course?.id ?? null,
     courseCode: s.exam.course?.code ?? null,
     courseTitle: s.exam.course?.title ?? null,
@@ -67,7 +79,7 @@ const present = (s: SittingRow) => {
     sessionName: s.exam.session?.name ?? null,
     startsAt: s.startsAt,
     endsAt: s.endsAt,
-    durationMin: s.durationMin,
+    durationMin: s.durationMin ?? s.exam.durationMin ?? 60,
     lateGraceMin: s.lateGraceMin,
     lateCutoffMin: s.lateCutoffMin,
     venue: s.venue,
