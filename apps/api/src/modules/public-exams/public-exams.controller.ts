@@ -69,7 +69,7 @@ const examMeta = (exam: ExamMeta) => {
   const state = isApproved ? windowState(exam) : ('NOT_OPEN' as const);
 
   return {
-    slug: exam.publicSlug,
+    slug: exam.publicSlug || exam.id,
     title: exam.title,
     kind: exam.kind,
     kindLabel: exam.kindLabel ?? exam.kind.replaceAll('_', ' ').toLowerCase(),
@@ -100,17 +100,59 @@ const examMeta = (exam: ExamMeta) => {
 
 async function findPublicExam(slug: string) {
   const cleanSlug = String(slug || '').trim();
-  const exam = await prisma.exam.findFirst({
+  let exam = await prisma.exam.findFirst({
     where: {
       OR: [
         { publicSlug: cleanSlug },
         { id: cleanSlug },
+        { sittings: { some: { id: cleanSlug } } },
       ],
       audience: 'PUBLIC',
     },
     include: examMetaInclude,
   });
+
+  // Fallback: If not found, check if a sitting exists with this ID or examId
+  if (!exam) {
+    const sitting = await prisma.sitting.findFirst({
+      where: {
+        OR: [
+          { id: cleanSlug },
+          { examId: cleanSlug },
+        ],
+      },
+      select: { examId: true, isPublic: true },
+    });
+
+    if (sitting) {
+      exam = await prisma.exam.findUnique({
+        where: { id: sitting.examId },
+        include: examMetaInclude,
+      });
+    }
+  }
+
   if (!exam) throw Errors.notFound('Exam');
+
+  // Auto-heal missing publicSlug or accessCode on the exam
+  const currentSettings = ((exam.settings ?? {}) as Record<string, any>);
+  if (!exam.publicSlug || !currentSettings.accessCode) {
+    let code = currentSettings.accessCode as string | undefined;
+    let codeHash = exam.publicAccessCodeHash;
+    if (!code) {
+      code = Math.floor(100000 + Math.random() * 900000).toString();
+      codeHash = await bcrypt.hash(code, 10);
+    }
+    const updateData: Prisma.ExamUpdateInput = {
+      ...(!exam.publicSlug ? { publicSlug: exam.id } : {}),
+      ...(!currentSettings.accessCode ? { settings: { ...currentSettings, accessCode: code }, publicAccessCodeHash: codeHash } : {}),
+    };
+    await prisma.exam.update({
+      where: { id: exam.id },
+      data: updateData,
+    }).catch(() => {});
+  }
+
   return exam;
 }
 
