@@ -318,10 +318,10 @@ export async function getStudentDashboard(userId: string) {
 
     const inProgress = latestAttempt && latestAttempt.status === 'IN_PROGRESS';
 
-    // Format times
-    const startStr = s.startsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: false });
-    const endStr = s.endsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: false });
-    const dateLabel = s.startsAt.toLocaleDateString('en-NG', { weekday: 'short', day: 'numeric', month: 'short' });
+    // Format times with Africa/Lagos timezone (WAT, UTC+1) so students see exact scheduled exam time
+    const startStr = s.startsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Africa/Lagos' });
+    const endStr = s.endsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Africa/Lagos' });
+    const dateLabel = s.startsAt.toLocaleDateString('en-NG', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'Africa/Lagos' });
 
     if (isSubmitted) {
       const res = latestAttempt.results[0];
@@ -418,6 +418,12 @@ export async function getStudentDashboard(userId: string) {
         });
         if (userNotif?.meta && typeof userNotif.meta === 'object' && (userNotif.meta as any).accessCode) {
           accessCode = (userNotif.meta as any).accessCode;
+        }
+      }
+      if (!accessCode && exam.settings && typeof exam.settings === 'object') {
+        const setCode = (exam.settings as Record<string, any>).accessCode;
+        if (typeof setCode === 'string' && setCode.trim()) {
+          accessCode = setCode.trim();
         }
       }
     }
@@ -615,6 +621,13 @@ export async function getSittingDetails(userId: string, sittingId: string) {
       startsAt: sitting.startsAt,
       endsAt: sitting.endsAt,
       requiresAccessCode: Boolean(sitting.accessCodeHash),
+      accessCode:
+        !sitting.isPublic &&
+        exam.audience !== 'PUBLIC' &&
+        exam.settings &&
+        typeof exam.settings === 'object'
+          ? (((exam.settings as Record<string, any>).accessCode as string | undefined) ?? null)
+          : null,
       instructions: exam.instructions || null,
       antiCheatEnabled: examSettings.antiCheatEnabled,
       isAlreadyTaken,
@@ -745,11 +758,11 @@ export async function startSittingAttempt(
       await prisma.sitting.update({ where: { id: sitting.id }, data: { status: 'OPEN' } }).catch(() => {});
       sitting.status = 'OPEN';
     } else {
-      const scheduledTimeStr = sitting.startsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const scheduledTimeStr = sitting.startsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Lagos' });
       throw Errors.conflict('SITTING_NOT_STARTED', `This examination is scheduled for ${scheduledTimeStr}. Access is not permitted until the scheduled start time.`);
     }
   } else if (sitting.status !== 'OPEN' && now < sitting.startsAt) {
-    const scheduledTimeStr = sitting.startsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const scheduledTimeStr = sitting.startsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Lagos' });
     throw Errors.conflict('SITTING_NOT_STARTED', `This examination is scheduled for ${scheduledTimeStr}. Access is not permitted until the scheduled start time.`);
   }
 

@@ -208,44 +208,11 @@ const generateAccessCode = () => String(crypto.randomInt(100000, 1000000));
 const hashAccessCode = (code: string) => bcrypt.hash(code, 10);
 
 /**
- * Allows up to two concurrent institution sittings (e.g. parallel halls or two exams on the same day).
- * Public exams use a hidden sitting and are excluded.
+ * Multiple internal and public exams can be scheduled simultaneously across courses,
+ * departments, venues, or parallel online sessions without conflict.
  */
-async function assertNoSittingOverlap(startsAt: Date, endsAt: Date, excludeId?: string, client?: any) {
-  const db = client || prisma;
-  const clashes = await db.sitting.findMany({
-    where: {
-      isPublic: false,
-      status: { not: 'CANCELLED' },
-      ...(excludeId ? { id: { not: excludeId } } : {}),
-      startsAt: { lt: endsAt },
-      endsAt: { gt: startsAt },
-    },
-    select: {
-      startsAt: true,
-      endsAt: true,
-      exam: {
-        select: {
-          title: true,
-          course: { select: { code: true, title: true } },
-          subject: { select: { name: true } },
-        },
-      },
-    },
-  });
-  if (clashes.length >= 2) {
-    const clash = clashes[0];
-    const clashExam = clash.exam.course
-      ? `${clash.exam.course.code} — ${clash.exam.course.title}`
-      : (clash.exam.subject?.name ?? clash.exam.title);
-    const from = clash.startsAt.toISOString().slice(11, 16);
-    const to = clash.endsAt.toISOString().slice(11, 16);
-    throw Errors.conflict(
-      'TIME_CLASH',
-      `A maximum of 2 concurrent exams may be scheduled on this slot. Slot already has ${clashes.length} active exams (including ${clashExam} from ${from}–${to} UTC).`,
-      { startsAt: clash.startsAt, endsAt: clash.endsAt },
-    );
-  }
+async function assertNoSittingOverlap(_startsAt: Date, _endsAt: Date, _excludeId?: string, _client?: any) {
+  // Allow multiple concurrent examinations (internal or public) without artificial clash limits
 }
 
 async function assertInvigilatorsFree(
@@ -304,6 +271,7 @@ export const createSitting = async (req: Request, res: Response) => {
         status: true,
         audience: true,
         courseId: true,
+        subjectId: true,
         sessionId: true,
         createdBy: true,
         title: true,
@@ -387,25 +355,11 @@ export const createSitting = async (req: Request, res: Response) => {
   const courseLabel = exam.course ? `${exam.course.code} — ${exam.course.title}` : exam.title;
 
   const created = await prisma.$transaction(async (tx) => {
-    // 1. Guard against duplicate scheduling: Exam cannot be scheduled twice for active sittings
-    const existingActive = await tx.sitting.findFirst({
-      where: {
-        examId: exam.id,
-        status: { in: ['SCHEDULED', 'OPEN'] },
-      },
-      select: { id: true, startsAt: true, status: true },
-    });
-    if (existingActive) {
-      throw Errors.conflict(
-        'EXAM_ALREADY_SCHEDULED',
-        'This exam is already scheduled for an active sitting. An exam cannot be scheduled twice while another sitting is active or scheduled.',
-        { sittingId: existingActive.id, startsAt: existingActive.startsAt, status: existingActive.status },
-      );
-    }
-
-    // 2. Transactional overlap and invigilator checks to avoid race conditions
+    // 1. Transactional overlap and invigilator checks: Allow scheduling multiple concurrent exams (internal or public)
     await assertNoSittingOverlap(startsAt, endsAt, undefined, tx);
-    await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt, undefined, tx);
+    if (body.invigilatorIds.length > 0) {
+      await assertInvigilatorsFree(body.invigilatorIds, startsAt, endsAt, undefined, tx);
+    }
 
     const sitting = await tx.sitting.create({
       data: {
@@ -506,7 +460,25 @@ export const createSitting = async (req: Request, res: Response) => {
 
     // Access code is sent to Admin and Lecturer ONLY (for public exams, and also for internal exams)
     const examUrl = isPublic && exam.publicSlug ? `/exam/${exam.publicSlug}` : `/student/exam/${sitting.id}/start?code=${accessCode}`;
-    const lecturerRecipients = [...new Set([exam.createdBy, ...body.invigilatorIds].filter(Boolean))] as string[];
+    const courseLecturers = exam.courseId
+      ? await tx.courseAssignment.findMany({
+          where: { courseId: exam.courseId },
+          select: { userId: true },
+        })
+      : [];
+    const subjectCreator = exam.subjectId
+      ? await tx.subject.findUnique({
+          where: { id: exam.subjectId },
+          select: { createdBy: true },
+        })
+      : null;
+
+    const lecturerRecipients = [...new Set([
+      exam.createdBy,
+      ...courseLecturers.map((c) => c.userId),
+      subjectCreator?.createdBy,
+      ...body.invigilatorIds,
+    ].filter(Boolean))] as string[];
     if (lecturerRecipients.length > 0) {
       await notifyUsers(
         tx,
@@ -702,6 +674,8 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
           id: true,
           title: true,
           createdBy: true,
+          courseId: true,
+          subjectId: true,
           audience: true,
           publicSlug: true,
           settings: true,
@@ -724,9 +698,24 @@ export const regenerateAccessCode = async (req: Request, res: Response) => {
   const courseLabel = sitting.exam.course ? sitting.exam.course.code : (sitting.exam.subject?.name ?? sitting.exam.title);
   const examUrl = isPublic && sitting.exam.publicSlug ? `/exam/${sitting.exam.publicSlug}` : `/student/exam/${id}/start?code=${accessCode}`;
 
+  const courseLecturers = sitting.exam.courseId
+    ? await prisma.courseAssignment.findMany({
+        where: { courseId: sitting.exam.courseId },
+        select: { userId: true },
+      })
+    : [];
+  const subjectCreator = sitting.exam.subjectId
+    ? await prisma.subject.findUnique({
+        where: { id: sitting.exam.subjectId },
+        select: { createdBy: true },
+      })
+    : null;
+
   // Staff recipients (Admin, assigned Lecturer, Invigilators): access code is sent to them
   const staffRecipients = [...new Set([
     sitting.exam.createdBy,
+    ...courseLecturers.map((c) => c.userId),
+    subjectCreator?.createdBy,
     ...sitting.invigilators.map((i) => i.userId),
     actor.actorId,
   ].filter(Boolean))] as string[];
@@ -889,9 +878,12 @@ const transition = async (
         status: true,
         venue: true,
         startsAt: true,
+        isPublic: true,
         exam: {
           select: {
+            id: true,
             title: true,
+            audience: true,
             course: { select: { code: true } },
             subject: { select: { name: true } },
           },
@@ -931,6 +923,14 @@ const transition = async (
       : (sitting.exam.subject?.name ?? sitting.exam.title);
 
     if (to === 'OPEN') {
+      if (sitting.isPublic || sitting.exam.audience === 'PUBLIC') {
+        await tx.exam.update({
+          where: { id: sitting.exam.id },
+          data: {
+            publicOpensAt: new Date(),
+          },
+        });
+      }
       await notifyUsers(
         tx,
         sitting.students.map((s) => s.studentId),

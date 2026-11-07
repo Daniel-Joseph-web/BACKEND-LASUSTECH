@@ -226,7 +226,7 @@ export const releaseResults = async (req: Request, res: Response) => {
   if (now < sitting.endsAt && sitting.status !== 'CLOSED') {
     throw Errors.badRequest(
       'EXAM_NOT_CONCLUDED',
-      `Results cannot be released while the examination is still active or ongoing. The exam is scheduled until ${sitting.endsAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}. Results can only be released after the exam has concluded.`,
+      `Results cannot be released while the examination is still active or ongoing. The exam is scheduled until ${sitting.endsAt.toLocaleTimeString('en-NG', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'Africa/Lagos' })}. Results can only be released after the exam has concluded.`,
     );
   }
 

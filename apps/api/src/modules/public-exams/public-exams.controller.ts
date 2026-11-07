@@ -30,7 +30,10 @@ const examMetaInclude = {
     orderBy: { position: 'asc' as const },
     include: { _count: { select: { questions: true } } },
   },
-  sittings: { where: { isPublic: true }, take: 1 },
+  sittings: {
+    where: { isPublic: true, status: { not: 'CANCELLED' } },
+    orderBy: { createdAt: 'desc' },
+  },
 } satisfies Prisma.ExamInclude;
 
 type ExamMeta = Prisma.ExamGetPayload<{ include: typeof examMetaInclude }>;
@@ -43,9 +46,17 @@ const settingsOf = (exam: { settings: Prisma.JsonValue }) =>
 const boolSetting = (settings: Record<string, unknown>, key: string, fallback: boolean) =>
   typeof settings[key] === 'boolean' ? (settings[key] as boolean) : fallback;
 
-function windowState(exam: { publicOpensAt: Date | null; publicClosesAt: Date | null }, now = new Date()) {
-  if (exam.publicOpensAt && now < exam.publicOpensAt) return 'NOT_OPEN' as const;
-  if (exam.publicClosesAt && now > exam.publicClosesAt) return 'CLOSED' as const;
+function windowState(exam: { publicOpensAt: Date | null; publicClosesAt: Date | null; sittings?: { status: string; startsAt: Date; endsAt: Date }[] }, now = new Date()) {
+  const hasOpenSitting = exam.sittings?.some((s) => s.status === 'OPEN');
+  if (hasOpenSitting) return 'OPEN' as const;
+
+  if (exam.publicClosesAt && now > exam.publicClosesAt) {
+    if (!hasOpenSitting) return 'CLOSED' as const;
+  }
+  if (exam.publicOpensAt) {
+    const buffered = new Date(exam.publicOpensAt.getTime() - 15 * 60_000);
+    if (now < buffered && !hasOpenSitting) return 'NOT_OPEN' as const;
+  }
   return 'OPEN' as const;
 }
 
@@ -54,7 +65,7 @@ const questionCount = (exam: ExamMeta) =>
 
 const examMeta = (exam: ExamMeta) => {
   const settings = settingsOf(exam);
-  const isApproved = exam.status === 'APPROVED';
+  const isApproved = exam.status === 'APPROVED' || exam.status === 'LOCKED';
   const state = isApproved ? windowState(exam) : ('NOT_OPEN' as const);
 
   return {
@@ -90,7 +101,13 @@ const examMeta = (exam: ExamMeta) => {
 async function findPublicExam(slug: string) {
   const cleanSlug = String(slug || '').trim();
   const exam = await prisma.exam.findFirst({
-    where: { publicSlug: cleanSlug, audience: 'PUBLIC' },
+    where: {
+      OR: [
+        { publicSlug: cleanSlug },
+        { id: cleanSlug },
+      ],
+      audience: 'PUBLIC',
+    },
     include: examMetaInclude,
   });
   if (!exam) throw Errors.notFound('Exam');
@@ -241,7 +258,8 @@ function tokenTtl(attempt: { deadlineAt: Date | null }) {
 }
 
 async function resumeOrCreateSitting(exam: ExamMeta) {
-  if (exam.sittings[0]) return exam.sittings[0];
+  const activeSitting = exam.sittings.find((s) => s.status === 'OPEN') || exam.sittings[0];
+  if (activeSitting) return activeSitting;
   // Should have been created at publish time; this keeps older public exams
   // (published before the hidden sitting existed) working.
   const settings = settingsOf(exam);
@@ -370,7 +388,7 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
   const body = startSchema.parse(req.body);
   const exam = await findPublicExam(slug);
 
-  if (exam.status !== 'APPROVED') {
+  if (exam.status !== 'APPROVED' && exam.status !== 'LOCKED') {
     throw Errors.conflict('EXAM_NOT_SCHEDULED', 'This examination has not been scheduled by an Administrator yet. Please check back later.');
   }
 
@@ -396,10 +414,21 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
     codeValid = true;
   }
   if (!codeValid && exam.publicAccessCodeHash) {
-    codeValid = await bcrypt.compare(body.accessCode.trim(), exam.publicAccessCodeHash);
+    try {
+      codeValid = await bcrypt.compare(body.accessCode.trim(), exam.publicAccessCodeHash);
+    } catch {}
   }
-  if (!codeValid && exam.sittings[0]?.accessCodeHash) {
-    codeValid = await bcrypt.compare(body.accessCode.trim(), exam.sittings[0].accessCodeHash);
+  if (!codeValid && exam.sittings) {
+    for (const sit of exam.sittings) {
+      if (sit.accessCodeHash) {
+        try {
+          if (await bcrypt.compare(body.accessCode.trim(), sit.accessCodeHash)) {
+            codeValid = true;
+            break;
+          }
+        } catch {}
+      }
+    }
   }
   if (!codeValid) {
     throw Errors.badRequest('INVALID_ACCESS_CODE', 'Invalid access code. Please obtain the correct code from the examiner or administrator.');
