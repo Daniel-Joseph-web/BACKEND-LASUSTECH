@@ -47,15 +47,18 @@ const boolSetting = (settings: Record<string, unknown>, key: string, fallback: b
   typeof settings[key] === 'boolean' ? (settings[key] as boolean) : fallback;
 
 function windowState(exam: { publicOpensAt: Date | null; publicClosesAt: Date | null; sittings?: { status: string; startsAt: Date; endsAt: Date }[] }, now = new Date()) {
-  const hasOpenSitting = exam.sittings?.some((s) => s.status === 'OPEN');
-  if (hasOpenSitting) return 'OPEN' as const;
+  const hasLiveOrScheduledSitting = exam.sittings?.some((s) => s.status === 'OPEN' || s.status === 'SCHEDULED');
+  if (hasLiveOrScheduledSitting) return 'OPEN' as const;
+
+  const hasAllClosedSittings = exam.sittings && exam.sittings.length > 0 && exam.sittings.every((s) => s.status === 'CLOSED' || s.status === 'CANCELLED');
+  if (hasAllClosedSittings) return 'CLOSED' as const;
 
   if (exam.publicClosesAt && now > exam.publicClosesAt) {
-    if (!hasOpenSitting) return 'CLOSED' as const;
+    return 'CLOSED' as const;
   }
   if (exam.publicOpensAt) {
     const buffered = new Date(exam.publicOpensAt.getTime() - 15 * 60_000);
-    if (now < buffered && !hasOpenSitting) return 'NOT_OPEN' as const;
+    if (now < buffered) return 'NOT_OPEN' as const;
   }
   return 'OPEN' as const;
 }
@@ -117,22 +120,30 @@ async function findPublicExam(slug: string) {
     orConditions.push({ sittings: { some: { id: cleanSlug } } });
   }
 
+  // Look up exam without audience constraint so any link shared with candidates resolves cleanly
   let exam = await prisma.exam.findFirst({
     where: {
       OR: orConditions,
-      AND: [
-        {
-          OR: [
-            { audience: 'PUBLIC' },
-            { sittings: { some: { isPublic: true } } },
-          ],
-        },
-      ],
     },
     include: examMetaInclude,
   });
 
-  // Fallback: If not found and it is a valid UUID, check if a sitting exists with this ID or examId
+  // 2. Case-insensitive, title, or course code lookup
+  if (!exam) {
+    exam = await prisma.exam.findFirst({
+      where: {
+        OR: [
+          { publicSlug: { equals: cleanSlug, mode: 'insensitive' } },
+          { title: { equals: cleanSlug, mode: 'insensitive' } },
+          { course: { code: { equals: cleanSlug, mode: 'insensitive' } } },
+          ...(validUuid ? [{ sittings: { some: { id: cleanSlug } } }, { id: cleanSlug }] : []),
+        ],
+      },
+      include: examMetaInclude,
+    });
+  }
+
+  // 3. Fallback: If not found and it is a valid UUID, check if a sitting exists with this ID or examId
   if (!exam && validUuid) {
     const sitting = await prisma.sitting.findFirst({
       where: {
@@ -154,19 +165,29 @@ async function findPublicExam(slug: string) {
 
   if (!exam) throw Errors.notFound('Exam');
 
-  // Auto-heal missing publicSlug or accessCode or audience on the exam
+  // Auto-heal missing publicSlug, accessCode, audience, or status on the exam
   const currentSettings = ((exam.settings ?? {}) as Record<string, any>);
-  if (!exam.publicSlug || !currentSettings.accessCode || exam.audience !== 'PUBLIC') {
-    let code = currentSettings.accessCode as string | undefined;
+  const needsSlug = !exam.publicSlug;
+  const needsCode = !currentSettings.accessCode;
+  const needsAudience = exam.audience !== 'PUBLIC';
+  const needsApproval = exam.status !== 'APPROVED' && exam.status !== 'LOCKED';
+
+  if (needsSlug || needsCode || needsAudience || needsApproval || !exam.publicAccessCodeHash) {
+    let code = (currentSettings.accessCode as string | undefined)?.trim();
     let codeHash = exam.publicAccessCodeHash;
     if (!code) {
       code = Math.floor(100000 + Math.random() * 900000).toString();
       codeHash = await bcrypt.hash(code, 10);
+    } else if (!codeHash) {
+      codeHash = await bcrypt.hash(code, 10);
     }
     const updateData: Prisma.ExamUpdateInput = {
-      ...(!exam.publicSlug ? { publicSlug: exam.id } : {}),
-      ...(exam.audience !== 'PUBLIC' ? { audience: 'PUBLIC' } : {}),
-      ...(!currentSettings.accessCode ? { settings: { ...currentSettings, accessCode: code }, publicAccessCodeHash: codeHash } : {}),
+      ...(needsSlug ? { publicSlug: exam.id } : {}),
+      ...(needsAudience ? { audience: 'PUBLIC' } : {}),
+      ...(needsApproval ? { status: 'APPROVED', publishedAt: exam.publishedAt || new Date() } : {}),
+      ...(needsCode || !exam.publicAccessCodeHash
+        ? { settings: { ...currentSettings, accessCode: code }, publicAccessCodeHash: codeHash }
+        : {}),
     };
     await prisma.exam.update({
       where: { id: exam.id },
@@ -485,12 +506,28 @@ export const startPublicAttempt = async (req: Request, res: Response) => {
     for (const sit of exam.sittings) {
       if (sit.accessCodeHash) {
         try {
-          if (await bcrypt.compare(body.accessCode.trim(), sit.accessCodeHash)) {
+          if (await bcrypt.compare(body.accessCode.trim(), sit.accessCodeHash) || await bcrypt.compare(inputCode, sit.accessCodeHash)) {
             codeValid = true;
             break;
           }
         } catch {}
       }
+    }
+  }
+  if (!codeValid) {
+    // Check if code was sent in any sitting notification
+    for (const sit of exam.sittings || []) {
+      try {
+        const notif = await prisma.notification.findFirst({
+          where: { meta: { path: ['sittingId'], equals: sit.id } },
+          orderBy: { createdAt: 'desc' },
+        });
+        const notifCode = ((notif?.meta as any)?.accessCode as string | undefined)?.trim().toUpperCase();
+        if (notifCode && notifCode === inputCode) {
+          codeValid = true;
+          break;
+        }
+      } catch {}
     }
   }
   if (!codeValid) {
