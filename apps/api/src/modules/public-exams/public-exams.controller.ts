@@ -17,11 +17,20 @@ const startSchema = z.object({
   accessCode: z.preprocess(blankToUndef, z.string().trim().max(64).optional()),
 });
 
-const answerSchema = z.object({
-  questionVersionId: z.string().uuid(),
-  positions: z.array(z.number().int().min(0).max(20)).max(10),
-  flagged: z.boolean().optional(),
-});
+const answerSchema = z
+  .object({
+    questionVersionId: z.string().uuid(),
+    positions: z.array(z.number().int().min(0).max(20)).max(10).optional(),
+    selectedPositions: z.array(z.number().int().min(0).max(20)).max(10).optional(),
+    flagged: z.boolean().optional(),
+    clientSeq: z.number().int().optional(),
+  })
+  .transform((data) => ({
+    questionVersionId: data.questionVersionId,
+    positions: data.positions ?? data.selectedPositions ?? [],
+    flagged: data.flagged,
+    clientSeq: data.clientSeq,
+  }));
 
 const examMetaInclude = {
   course: { select: { id: true, code: true, title: true, level: true } },
@@ -304,7 +313,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     questionCount: attempt.questionCount,
     totalMarks: Number(attempt.totalMarks),
     exam: examMeta(attempt.sitting.exam),
-    requireWebcam: attempt.sitting.requireWebcam ?? false,
+    requireWebcam: attempt.sitting.requireWebcam ?? boolSetting(settings, 'requireWebcam', true),
     antiCheatEnabled: boolSetting(settings, 'antiCheatEnabled', true),
     sections,
     questions: presentPaper(attempt),
