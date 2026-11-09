@@ -18,6 +18,38 @@ const dayRange = () => {
   return { day, start, end };
 };
 
+export async function resolveSitting(rawId: string) {
+  const isUuid = z.string().uuid().safeParse(rawId).success;
+  let sitting = isUuid
+    ? await prisma.sitting.findUnique({ where: { id: rawId }, include: { exam: true } })
+    : null;
+  if (!sitting && isUuid) {
+    sitting = await prisma.sitting.findFirst({
+      where: { examId: rawId },
+      include: { exam: true },
+      orderBy: { startsAt: 'desc' },
+    });
+  }
+  if (!sitting) {
+    sitting = await prisma.sitting.findFirst({
+      where: { exam: { publicSlug: rawId } },
+      include: { exam: true },
+      orderBy: { startsAt: 'desc' },
+    });
+  }
+  if (!sitting) throw Errors.notFound('Sitting');
+  return sitting;
+}
+
+export async function loadAttemptInSitting(sittingId: string, attemptId: string) {
+  const sitting = await resolveSitting(sittingId);
+  const attempt = await prisma.attempt.findUnique({ where: { id: attemptId } });
+  if (!attempt || (attempt.sittingId !== sitting.id && attempt.sittingId !== sittingId)) {
+    throw Errors.notFound('Attempt');
+  }
+  return { attempt, sitting };
+}
+
 const liveInclude = {
   exam: {
     select: {
@@ -27,7 +59,7 @@ const liveInclude = {
     },
   },
   venueRef: { select: { id: true, code: true, name: true, capacity: true } },
-  _count: { select: { students: true, invigilators: true } },
+  _count: { select: { students: true, invigilators: true, attempts: true } },
 } satisfies Prisma.SittingInclude;
 
 type LiveSitting = Prisma.SittingGetPayload<{ include: typeof liveInclude }>;
@@ -94,28 +126,31 @@ async function statsFor(sittingIds: string[]) {
   return map;
 }
 
-const presentLive = (s: LiveSitting, stats: SittingStats) => ({
-  id: s.id,
-  examId: s.examId,
-  examTitle: s.exam.title,
-  courseCode: s.exam.course?.code ?? null,
-  courseTitle: s.exam.course?.title ?? null,
-  startsAt: s.startsAt,
-  endsAt: s.endsAt,
-  durationMin: s.durationMin,
-  venue: s.venue,
-  venueId: s.venueId,
-  status: s.status,
-  registered: s._count.students,
-  terminals: s.venueRef?.capacity ?? s._count.students,
-  invigilators: s._count.invigilators,
-  active: stats.active,
-  submitted: stats.submitted,
-  flagged: stats.flagged,
-  offline: stats.offline,
-});
+const presentLive = (s: LiveSitting, stats: SittingStats) => {
+  const registeredCount = Math.max(s._count.students, s._count.attempts ?? 0);
+  return {
+    id: s.id,
+    examId: s.examId,
+    examTitle: s.exam.title,
+    courseCode: s.exam.course?.code ?? null,
+    courseTitle: s.exam.course?.title ?? null,
+    startsAt: s.startsAt,
+    endsAt: s.endsAt,
+    durationMin: s.durationMin,
+    venue: s.venue,
+    venueId: s.venueId,
+    status: s.status,
+    registered: registeredCount,
+    terminals: s.venueRef?.capacity ?? registeredCount,
+    invigilators: s._count.invigilators,
+    active: stats.active,
+    submitted: stats.submitted,
+    flagged: stats.flagged,
+    offline: stats.offline,
+  };
+};
 
-/** Today's sittings (Africa/Lagos) with their live counters. */
+/** Today's sittings (Africa/Lagos) + all open / public sittings with live counters. */
 export const listLive = async (req: Request, res: Response) => {
   await closeExpiredSittings();
   const q = z
@@ -125,22 +160,33 @@ export const listLive = async (req: Request, res: Response) => {
     })
     .parse(req.query);
 
-  await closeExpiredSittings();
-
   const { day, start, end } = dayRange();
-  const where: Prisma.SittingWhereInput = {
-    startsAt: { gte: start, lt: end },
-    status: q.status === 'ALL' ? { not: 'CANCELLED' } : q.status,
-  };
+  const conditions: Prisma.SittingWhereInput[] = [
+    {
+      OR: [
+        { startsAt: { gte: start, lt: end } },
+        { status: 'OPEN' },
+        { isPublic: true },
+      ],
+    },
+    {
+      status: q.status === 'ALL' ? { not: 'CANCELLED' } : q.status,
+    },
+  ];
+
   if (q.search) {
     const search = q.search;
-    where.OR = [
-      { venue: { contains: search, mode: 'insensitive' } },
-      { exam: { title: { contains: search, mode: 'insensitive' } } },
-      { exam: { course: { code: { contains: search, mode: 'insensitive' } } } },
-      { exam: { course: { title: { contains: search, mode: 'insensitive' } } } },
-    ];
+    conditions.push({
+      OR: [
+        { venue: { contains: search, mode: 'insensitive' } },
+        { exam: { title: { contains: search, mode: 'insensitive' } } },
+        { exam: { course: { code: { contains: search, mode: 'insensitive' } } } },
+        { exam: { course: { title: { contains: search, mode: 'insensitive' } } } },
+      ],
+    });
   }
+
+  const where: Prisma.SittingWhereInput = { AND: conditions };
 
   const sittings = await prisma.sitting.findMany({
     where,
@@ -215,11 +261,34 @@ type StudentRow = {
   state: string;
 };
 
+async function resolveLiveSitting(rawId: string) {
+  const isUuid = z.string().uuid().safeParse(rawId).success;
+  let sitting = isUuid
+    ? await prisma.sitting.findUnique({ where: { id: rawId }, include: detailInclude })
+    : null;
+  if (!sitting && isUuid) {
+    sitting = await prisma.sitting.findFirst({
+      where: { examId: rawId },
+      include: detailInclude,
+      orderBy: { startsAt: 'desc' },
+    });
+  }
+  if (!sitting) {
+    sitting = await prisma.sitting.findFirst({
+      where: { exam: { publicSlug: rawId } },
+      include: detailInclude,
+      orderBy: { startsAt: 'desc' },
+    });
+  }
+  if (!sitting) throw Errors.notFound('Sitting');
+  return sitting;
+}
+
 export const getLiveSitting = async (req: Request, res: Response) => {
   await closeExpiredSittings();
-  const id = uuidParam(req);
-  const sitting = await prisma.sitting.findUnique({ where: { id }, include: detailInclude });
-  if (!sitting) throw Errors.notFound('Sitting');
+  const rawId = String(req.params.id || '');
+  const sitting = await resolveLiveSitting(rawId);
+  const id = sitting.id;
 
   const attempts = await prisma.attempt.findMany({
     where: { sittingId: id },
@@ -340,12 +409,13 @@ function toStudent(
   lastSeen: Map<string, { last_seen: Date | null; last_type: string | null }>,
   now: number,
 ): StudentRow {
+  const displayMatric = user.matricNo || (attempt?.id ? `EXT-${attempt.id.slice(0, 6).toUpperCase()}` : null);
   if (!attempt) {
     return {
       attemptId: null,
       studentId: user.id,
       name: user.names,
-      matricNo: user.matricNo,
+      matricNo: displayMatric,
       seat,
       status: 'NOT_STARTED',
       progress: 0,
@@ -384,7 +454,7 @@ function toStudent(
     attemptId: attempt.id,
     studentId: user.id,
     name: user.names,
-    matricNo: user.matricNo,
+    matricNo: displayMatric,
     seat,
     status: attempt.status,
     progress: questionCount ? Math.round((answeredCount / questionCount) * 100) : 0,
@@ -411,7 +481,7 @@ function toStudent(
 }
 
 const interveneSchema = z.object({
-  attemptId: z.uuid(),
+  attemptId: z.string().uuid(),
   action: z.enum(['PAUSE', 'RESUME', 'EXTEND', 'RESET_SESSION', 'END', 'MESSAGE']),
   minutes: z.number().int().min(1).max(120).optional(),
   message: z.string().trim().max(500).optional(),
@@ -428,7 +498,7 @@ const ACTION_REASON: Record<string, string> = {
 };
 
 export const intervene = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const body = interveneSchema.parse(req.body);
   const actor = actorFrom(req, res);
 
@@ -439,9 +509,14 @@ export const intervene = async (req: Request, res: Response) => {
     throw Errors.badRequest('MESSAGE_REQUIRED', 'Enter the message to send.');
   }
 
+  const sitting = await resolveSitting(rawId);
+  const sittingId = sitting.id;
+
   const result = await prisma.$transaction(async (tx) => {
     const attempt = await tx.attempt.findUnique({ where: { id: body.attemptId } });
-    if (!attempt || attempt.sittingId !== sittingId) throw Errors.notFound('Attempt');
+    if (!attempt || (attempt.sittingId !== sittingId && attempt.sittingId !== rawId)) {
+      throw Errors.notFound('Attempt');
+    }
 
     const now = new Date();
     const reason = body.reason?.trim() || ACTION_REASON[body.action];
@@ -544,12 +619,12 @@ export const intervene = async (req: Request, res: Response) => {
     return updated;
   });
 
-  // Broadcast real-time intervention to student and sitting proctor room
+  // Broadcast real-time intervention to student and sitting proctor rooms
   void publishRealtimeEvent({
     event: 'attempt.intervene',
     target: {
       userIds: [result.studentId],
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`, `sitting:${result.sittingId}`],
     },
     data: {
       sittingId,
@@ -561,6 +636,7 @@ export const intervene = async (req: Request, res: Response) => {
       extraMinutes: result.extraMinutes,
       deadlineAt: result.deadlineAt ? result.deadlineAt.toISOString() : null,
       message: body.action === 'MESSAGE' ? (body.message?.trim() || null) : null,
+      minutes: body.minutes,
     },
   });
 
@@ -576,7 +652,7 @@ export const intervene = async (req: Request, res: Response) => {
 };
 
 export const broadcast = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const body = z
     .object({
       message: z.string().trim().min(1).max(500),
@@ -585,8 +661,8 @@ export const broadcast = async (req: Request, res: Response) => {
     .parse(req.body);
   const actor = actorFrom(req, res);
 
-  const sitting = await prisma.sitting.findUnique({ where: { id: sittingId }, select: { id: true } });
-  if (!sitting) throw Errors.notFound('Sitting');
+  const sitting = await resolveSitting(rawId);
+  const sittingId = sitting.id;
 
   const count = await prisma.$transaction(async (tx) => {
     const attempts = await tx.attempt.findMany({
@@ -613,11 +689,11 @@ export const broadcast = async (req: Request, res: Response) => {
     return attempts.length;
   });
 
-  // Broadcast real-time announcement to sitting room
+  // Broadcast real-time announcement to sitting rooms
   void publishRealtimeEvent({
     event: 'sitting.broadcast',
     target: {
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`],
       roles: ['STUDENT', 'ADMIN'],
     },
     data: {
@@ -632,7 +708,7 @@ export const broadcast = async (req: Request, res: Response) => {
 };
 
 export const extendAll = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const body = z
     .object({
       minutes: z.number().int().min(1).max(60),
@@ -641,10 +717,10 @@ export const extendAll = async (req: Request, res: Response) => {
     .parse(req.body);
   const actor = actorFrom(req, res);
 
-  const result = await prisma.$transaction(async (tx) => {
-    const sitting = await tx.sitting.findUnique({ where: { id: sittingId }, select: { id: true } });
-    if (!sitting) throw Errors.notFound('Sitting');
+  const sitting = await resolveSitting(rawId);
+  const sittingId = sitting.id;
 
+  const result = await prisma.$transaction(async (tx) => {
     const attempts = await tx.attempt.findMany({
       where: { sittingId, status: { in: ['IN_PROGRESS', 'PAUSED'] } },
       select: { id: true, studentId: true, extraMinutes: true, deadlineAt: true },
@@ -690,7 +766,7 @@ export const extendAll = async (req: Request, res: Response) => {
   void publishRealtimeEvent({
     event: 'sitting.extend_all',
     target: {
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`],
       roles: ['STUDENT', 'ADMIN'],
     },
     data: {
@@ -703,17 +779,12 @@ export const extendAll = async (req: Request, res: Response) => {
   res.json({ data: { sittingId, minutes: body.minutes, recipients: result.count } });
 };
 
-async function loadAttemptInSitting(sittingId: string, attemptId: string) {
-  const attempt = await prisma.attempt.findUnique({ where: { id: attemptId } });
-  if (!attempt || attempt.sittingId !== sittingId) throw Errors.notFound('Attempt');
-  return attempt;
-}
-
 export const clearFlags = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const attemptId = uuidParam(req, 'attemptId');
   const actor = actorFrom(req, res);
-  await loadAttemptInSitting(sittingId, attemptId);
+  const { sitting } = await loadAttemptInSitting(rawId, attemptId);
+  const sittingId = sitting.id;
 
   const result = await prisma.$transaction(async (tx) => {
     const flags = await tx.flag.updateMany({
@@ -732,7 +803,7 @@ export const clearFlags = async (req: Request, res: Response) => {
   void publishRealtimeEvent({
     event: 'attempt.flags_cleared',
     target: {
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`],
     },
     data: {
       sittingId,
@@ -745,7 +816,7 @@ export const clearFlags = async (req: Request, res: Response) => {
 };
 
 export const addFlag = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const attemptId = uuidParam(req, 'attemptId');
   const body = z
     .object({
@@ -754,7 +825,8 @@ export const addFlag = async (req: Request, res: Response) => {
     })
     .parse(req.body);
   const actor = actorFrom(req, res);
-  await loadAttemptInSitting(sittingId, attemptId);
+  const { sitting } = await loadAttemptInSitting(rawId, attemptId);
+  const sittingId = sitting.id;
 
   const created = await prisma.$transaction(async (tx) => {
     const flag = await tx.flag.create({
@@ -777,7 +849,7 @@ export const addFlag = async (req: Request, res: Response) => {
   void publishRealtimeEvent({
     event: 'attempt.flagged',
     target: {
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`],
     },
     data: {
       sittingId,
@@ -792,12 +864,14 @@ export const addFlag = async (req: Request, res: Response) => {
 };
 
 export const reassignSeat = async (req: Request, res: Response) => {
-  const sittingId = uuidParam(req);
+  const rawId = String(req.params.id || '');
   const attemptId = uuidParam(req, 'attemptId');
   const body = z.object({ seatLabel: z.string().trim().min(1).max(40) }).parse(req.body);
   const actor = actorFrom(req, res);
 
-  const attempt = await loadAttemptInSitting(sittingId, attemptId);
+  const { attempt, sitting } = await loadAttemptInSitting(rawId, attemptId);
+  const sittingId = sitting.id;
+
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.sittingStudent.findUnique({
       where: { sittingId_studentId: { sittingId, studentId: attempt.studentId } },
@@ -820,7 +894,7 @@ export const reassignSeat = async (req: Request, res: Response) => {
   void publishRealtimeEvent({
     event: 'attempt.seat_reassigned',
     target: {
-      rooms: [`sitting:${sittingId}`],
+      rooms: [`sitting:${sittingId}`, `sitting:${rawId}`],
       userIds: [attempt.studentId],
     },
     data: {
@@ -835,7 +909,9 @@ export const reassignSeat = async (req: Request, res: Response) => {
 };
 
 export const exportProctorLog = async (req: Request, res: Response) => {
-  const id = uuidParam(req);
+  const rawId = String(req.params.id || '');
+  const resolved = await resolveSitting(rawId);
+  const id = resolved.id;
   const sitting = await prisma.sitting.findUnique({
     where: { id },
     select: {

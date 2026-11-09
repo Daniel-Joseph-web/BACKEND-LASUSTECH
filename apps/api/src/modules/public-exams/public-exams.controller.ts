@@ -19,12 +19,13 @@ const startSchema = z.object({
 
 const answerSchema = z
   .object({
-    questionVersionId: z.string().uuid(),
-    positions: z.array(z.number().int().min(0).max(20)).max(10).optional(),
-    selectedPositions: z.array(z.number().int().min(0).max(20)).max(10).optional(),
+    questionVersionId: z.string().trim().min(1),
+    positions: z.array(z.coerce.number().int()).optional(),
+    selectedPositions: z.array(z.coerce.number().int()).optional(),
     flagged: z.boolean().optional(),
-    clientSeq: z.number().int().optional(),
+    clientSeq: z.coerce.number().int().optional(),
   })
+  .passthrough()
   .transform((data) => ({
     questionVersionId: data.questionVersionId,
     positions: data.positions ?? data.selectedPositions ?? [],
@@ -313,7 +314,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     questionCount: attempt.questionCount,
     totalMarks: Number(attempt.totalMarks),
     exam: examMeta(attempt.sitting.exam),
-    requireWebcam: attempt.sitting.requireWebcam === true || boolSetting(settings, 'requireWebcam', true),
+    requireWebcam: attempt.sitting.requireWebcam !== false && boolSetting(settings, 'requireWebcam', true),
     antiCheatEnabled: boolSetting(settings, 'antiCheatEnabled', true),
     sections,
     questions: presentPaper(attempt),
@@ -673,10 +674,10 @@ export const savePublicAnswer = async (req: Request, res: Response) => {
   );
   if (!question) throw Errors.badRequest('UNKNOWN_QUESTION', 'That question is not part of this attempt.');
 
-  const validPositions = new Set(question.optionOrder);
-  const positions = [...new Set(body.positions)];
-  if (positions.some((position) => !validPositions.has(position))) {
-    throw Errors.badRequest('INVALID_OPTION', 'That answer option is not part of this question.');
+  let positions = [...new Set(body.positions)];
+  if (question.optionOrder && question.optionOrder.length > 0) {
+    const validPositions = new Set(question.optionOrder);
+    positions = positions.filter((position) => validPositions.has(position));
   }
 
   const now = new Date();
@@ -849,7 +850,7 @@ export const recordPublicHeartbeat = async (req: Request, res: Response) => {
   const now = new Date();
   const lastWrite = lastPublicHeartbeatDbWrite.get(attempt.id) || 0;
 
-  if (now.getTime() - lastWrite >= 60_000) {
+  if (now.getTime() - lastWrite >= 15_000) {
     lastPublicHeartbeatDbWrite.set(attempt.id, now.getTime());
     prisma.attemptEvent.create({
       data: {
@@ -940,6 +941,18 @@ export const recordPublicEvent = async (req: Request, res: Response) => {
 
 export const recordPublicFlag = async (req: Request, res: Response) => {
   const attempt = await authorisedAttempt(req);
+
+  // If question review flag from candidate UI
+  if (req.body?.questionVersionId) {
+    const questionVersionId = String(req.body.questionVersionId);
+    const flagged = Boolean(req.body.flagged);
+    await prisma.answer.updateMany({
+      where: { attemptId: attempt.id, questionVersionId },
+      data: { flagged },
+    }).catch(() => {});
+    return res.json({ data: { recorded: true } });
+  }
+
   const type = String(req.body?.reason || req.body?.type || 'TAB_SWITCH');
   const count = typeof req.body?.count === 'number' ? req.body.count : 1;
   const now = new Date();

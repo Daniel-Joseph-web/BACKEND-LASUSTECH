@@ -1,15 +1,34 @@
 import { Queue } from 'bullmq';
-import Redis from 'ioredis';
+import Redis, { RedisOptions } from 'ioredis';
 
-const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+export function createRedisClient(rawUrl?: string): Redis {
+  let url = (rawUrl || process.env.REDIS_URL || 'redis://localhost:6379').trim();
+  const isUpstash = url.includes('upstash.io');
+  if (isUpstash && url.startsWith('redis://')) {
+    url = url.replace(/^redis:\/\//, 'rediss://');
+  }
 
-export const redisConnection = new Redis(redisUrl, {
-  maxRetriesPerRequest: null,
-});
+  const options: RedisOptions = {
+    maxRetriesPerRequest: null,
+    enableReadyCheck: false,
+    lazyConnect: true,
+    connectTimeout: 10000,
+    retryStrategy: (times: number) => Math.min(times * 100, 3000),
+  };
 
-redisConnection.on('error', (err) => {
-  console.warn(`[Redis] Connection warning: ${err.message}`);
-});
+  if (url.startsWith('rediss://') || isUpstash) {
+    options.tls = { rejectUnauthorized: false };
+  }
+
+  const client = new Redis(url, options);
+  client.on('error', (err) => {
+    console.warn(`[Redis] Connection warning: ${err.message}`);
+  });
+
+  return client;
+}
+
+export const redisConnection = createRedisClient();
 
 export const QUESTION_IMPORT_QUEUE = 'question-import-queue';
 

@@ -1,7 +1,7 @@
 import { Server as HttpServer } from 'node:http';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
-import Redis from 'ioredis';
+import Redis, { RedisOptions } from 'ioredis';
 
 export interface UserTokenPayload {
   sub: string;
@@ -61,8 +61,9 @@ export function setupRealtimeServer(
       socket.data.isGuest = false;
       return next();
     } catch {
-      // If token is invalid or expired, reject or fallback to guest
-      return next(new Error('AUTHENTICATION_ERROR: Invalid or expired token'));
+      // If token is invalid or expired, allow as guest so public candidates still connect
+      socket.data.isGuest = true;
+      return next();
     }
   });
 
@@ -79,27 +80,23 @@ export function setupRealtimeServer(
       }
       console.log(`[Socket] User connected: ${user.id} (${(user.roles || []).join(', ')}) [Socket: ${socket.id}]`);
     } else {
-      console.log(`[Socket] Guest connected: [Socket: ${socket.id}]`);
+      console.log(`[Socket] Guest candidate connected: [Socket: ${socket.id}]`);
     }
 
     // Allow clients to join specific channels (both exam candidates and invigilators)
     socket.on('join_sitting', (sittingId: string) => {
-      if (!user) {
-        socket.emit('error', { message: 'Authentication required to join sitting monitor' });
-        return;
-      }
       if (typeof sittingId === 'string' && sittingId.trim()) {
         const cleanSittingId = sittingId.trim();
         const room = `sitting:${cleanSittingId}`;
         socket.join(room);
 
         // Staff members also join the privileged staff channel for this sitting
-        const isStaff = user.roles?.some((r: string) => ['ADMIN', 'LECTURER'].includes(r));
+        const isStaff = user?.roles?.some((r: string) => ['ADMIN', 'LECTURER'].includes(r));
         if (isStaff) {
           socket.join(`sitting:${cleanSittingId}:staff`);
         }
 
-        console.log(`[Socket] ${socket.id} (${user.id}, ${(user.roles || []).join(',')}) joined room ${room}`);
+        console.log(`[Socket] ${socket.id} (${user?.id || 'guest'}, ${(user?.roles || []).join(',')}) joined room ${room}`);
       }
     });
 
@@ -125,13 +122,15 @@ export function setupRealtimeServer(
     });
 
     // Candidate camera frame relay for live video monitoring - directed strictly to invigilators/staff
-    socket.on('camera_frame', (payload: { sittingId: string; studentId?: string; attemptId?: string; matricNo?: string; frame: string }) => {
-      if (payload?.sittingId && payload.frame) {
+    socket.on('camera_frame', (payload: { sittingId: string; studentId?: string; attemptId?: string; studentName?: string; matricNo?: string; frame?: string; image?: string }) => {
+      const frameData = payload?.frame || payload?.image;
+      if (payload?.sittingId && frameData) {
         socket.to(`sitting:${payload.sittingId}:staff`).emit('candidate_camera_frame', {
-          studentId: payload.studentId || user?.id,
+          studentId: payload.studentId || user?.id || payload.attemptId,
           attemptId: payload.attemptId,
+          studentName: payload.studentName,
           matricNo: payload.matricNo,
-          frame: payload.frame,
+          frame: frameData,
           timestamp: Date.now(),
         });
       }
@@ -186,9 +185,25 @@ export function setupRealtimeServer(
   });
 
   // Redis Subscriber for cross-process events
-  const redisSub = new Redis(options.redisUrl, {
+  let redisUrl = (options.redisUrl || 'redis://localhost:6379').trim();
+  const isUpstash = redisUrl.includes('upstash.io');
+  if (isUpstash && redisUrl.startsWith('redis://')) {
+    redisUrl = redisUrl.replace(/^redis:\/\//, 'rediss://');
+  }
+
+  const redisOptions: RedisOptions = {
     maxRetriesPerRequest: null,
-  });
+    enableReadyCheck: false,
+    lazyConnect: true,
+    connectTimeout: 10000,
+    retryStrategy: (times: number) => Math.min(times * 100, 3000),
+  };
+
+  if (redisUrl.startsWith('rediss://') || isUpstash) {
+    redisOptions.tls = { rejectUnauthorized: false };
+  }
+
+  const redisSub = new Redis(redisUrl, redisOptions);
 
   redisSub.on('error', (err) => {
     console.warn(`[Realtime Redis] Connection warning: ${err.message}`);
