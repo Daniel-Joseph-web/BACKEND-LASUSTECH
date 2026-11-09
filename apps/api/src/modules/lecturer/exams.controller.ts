@@ -362,7 +362,7 @@ export const createExam = async (req: Request, res: Response) => {
     }
 
     return created;
-  });
+  }, { timeout: 30000, maxWait: 10000 });
 
   const detail = await detailById(exam.id);
   res.status(201).json({
@@ -711,7 +711,7 @@ export const submitExamForModeration = async (req: Request, res: Response) => {
     });
 
     return updated;
-  });
+  }, { timeout: 30000, maxWait: 10000 });
 
   res.json({ data: published });
 };

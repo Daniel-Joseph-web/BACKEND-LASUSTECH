@@ -30,6 +30,8 @@ publicExamRouter.get('/attempts/:id', getPublicAttempt);
 publicExamRouter.get('/attempts/:id/result', getPublicAttemptResult);
 publicExamRouter.put('/attempts/:id/answers', savePublicAnswer);
 publicExamRouter.post('/attempts/:id/answers', savePublicAnswer);
+publicExamRouter.put('/attempts/:id/answer', savePublicAnswer);
+publicExamRouter.post('/attempts/:id/answer', savePublicAnswer);
 publicExamRouter.post('/attempts/:id/heartbeat', recordPublicHeartbeat);
 publicExamRouter.post('/attempts/:id/events', recordPublicEvent);
 publicExamRouter.post('/attempts/:id/flag', recordPublicFlag);

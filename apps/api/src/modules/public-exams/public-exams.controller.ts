@@ -313,7 +313,7 @@ const attemptResponse = (attempt: AttemptWithPaper, token: string) => {
     questionCount: attempt.questionCount,
     totalMarks: Number(attempt.totalMarks),
     exam: examMeta(attempt.sitting.exam),
-    requireWebcam: attempt.sitting.requireWebcam ?? boolSetting(settings, 'requireWebcam', true),
+    requireWebcam: attempt.sitting.requireWebcam === true || boolSetting(settings, 'requireWebcam', true),
     antiCheatEnabled: boolSetting(settings, 'antiCheatEnabled', true),
     sections,
     questions: presentPaper(attempt),
@@ -461,7 +461,7 @@ async function createAttempt(exam: ExamMeta, sittingId: string, studentId: strin
     });
 
     return created;
-  });
+  }, { timeout: 30000, maxWait: 10000 });
 
   return { attempt, totalMarks };
 }
@@ -728,7 +728,7 @@ export const savePublicAnswer = async (req: Request, res: Response) => {
     });
 
     return answer;
-  });
+  }, { timeout: 30000, maxWait: 10000 });
 
   res.json({
     data: {
@@ -766,11 +766,13 @@ export const submitPublicAttempt = async (req: Request, res: Response) => {
   }
 
   const timedOut = Boolean(attempt.deadlineAt && attempt.deadlineAt.getTime() <= Date.now());
-  const summary = await prisma.$transaction((tx) =>
-    scoreAttempt(tx, attempt.id, {
-      auto: timedOut,
-      endedReason: timedOut ? 'EXPIRED' : 'STUDENT_SUBMIT',
-    }),
+  const summary = await prisma.$transaction(
+    (tx) =>
+      scoreAttempt(tx, attempt.id, {
+        auto: timedOut,
+        endedReason: timedOut ? 'EXPIRED' : 'STUDENT_SUBMIT',
+      }),
+    { timeout: 30000, maxWait: 10000 },
   );
 
   const fresh = await loadAttempt(attempt.id);

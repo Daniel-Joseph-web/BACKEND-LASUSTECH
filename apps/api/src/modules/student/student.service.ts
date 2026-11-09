@@ -1208,7 +1208,7 @@ export async function saveAnswer(
         clientTs: now,
       },
     });
-  });
+  }, { timeout: 30000, maxWait: 10000 });
 
   return { success: true, savedAt: now.toISOString() };
 }
@@ -1259,7 +1259,7 @@ export async function submitAttempt(
         auto: options.endedReason === 'AUTO_SUBMIT',
         endedReason: options.endedReason || 'STUDENT_SUBMIT',
       });
-    });
+    }, { timeout: 30000, maxWait: 10000 });
   }
 
   const examSettings = await getGroup('exam');
